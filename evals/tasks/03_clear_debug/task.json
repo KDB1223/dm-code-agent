@@ -1,0 +1,36 @@
+{
+  "id": "clear-debug",
+  "prompt": "app.py uses a bare except and calls breakpoint() when a file cannot be opened. Handle OSError instead, return an empty string, and remove the debugger call.",
+  "max_steps": 6,
+  "expect_tools": ["lint_python", "edit_file"],
+  "turns": [
+    {
+      "content": "I will lint app.py to see the structured findings.",
+      "tool_calls": [
+        {"name": "lint_python", "arguments": {"path": "app.py"}}
+      ]
+    },
+    {
+      "content": "The report shows a bare except and a breakpoint() call. I will replace that block.",
+      "tool_calls": [
+        {
+          "name": "edit_file",
+          "arguments": {
+            "path": "app.py",
+            "old": "    except:\n        breakpoint()\n        return \"\"",
+            "new": "    except OSError:\n        return \"\""
+          }
+        }
+      ]
+    },
+    {
+      "content": "I will lint again to confirm the findings are gone.",
+      "tool_calls": [
+        {"name": "lint_python", "arguments": {"path": "app.py"}}
+      ]
+    },
+    {
+      "content": "load_text() now catches OSError and no longer calls breakpoint()."
+    }
+  ]
+}
