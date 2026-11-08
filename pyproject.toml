@@ -50,4 +50,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "src" is the installable package. "." is the repo root so tests can import
+# the offline eval harness (evals/). The pytest console script does not put
+# the working directory on sys.path; `python -m pytest` does, which is why
+# this only showed up in CI.
+pythonpath = ["src", "."]
