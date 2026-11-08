@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dm-agent"
+description = "Local-first, auditable coding agent with a ReAct loop and JSONL session logs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "dm-agent contributors" }]
+keywords = [
+    "coding-agent",
+    "react",
+    "auditability",
+    "local-first",
+    "llm",
+    "education",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Education",
+    "Topic :: Software Development",
+]
+dynamic = ["version"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/KDB1223/KDB1223-dm-code-agent"
+Repository = "https://github.com/KDB1223/KDB1223-dm-code-agent"
+
+[project.scripts]
+dm-agent = "dm_agent.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "dm_agent.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

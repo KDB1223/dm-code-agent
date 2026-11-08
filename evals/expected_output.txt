@@ -1,0 +1,4 @@
+fix-add        PASS
+write-greet    PASS
+clear-debug    PASS
+score 3/3
