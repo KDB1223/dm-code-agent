@@ -36,8 +36,8 @@ dependencies = []
 dev = ["pytest>=8"]
 
 [project.urls]
-Homepage = "https://github.com/KDB1223/KDB1223-dm-code-agent"
-Repository = "https://github.com/KDB1223/KDB1223-dm-code-agent"
+Homepage = "https://github.com/KDB1223/dm-code-agent"
+Repository = "https://github.com/KDB1223/dm-code-agent"
 
 [project.scripts]
 dm-agent = "dm_agent.cli:main"

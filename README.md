@@ -1,6 +1,6 @@
 # dm-agent
 
-[![CI](https://github.com/KDB1223/KDB1223-dm-code-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/KDB1223/KDB1223-dm-code-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/KDB1223/dm-code-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/KDB1223/dm-code-agent/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](src/dm_agent/__init__.py)
@@ -37,8 +37,8 @@ A minimal baseline is the loop, the file/search/shell tools, and the JSONL log. 
 From a clean checkout, about a minute, no API key:
 
 ```bash
-git clone https://github.com/KDB1223/KDB1223-dm-code-agent.git
-cd KDB1223-dm-code-agent
+git clone https://github.com/KDB1223/dm-code-agent.git
+cd dm-code-agent
 python -m pip install -e ".[dev]"
 python -m evals.run
 ```
