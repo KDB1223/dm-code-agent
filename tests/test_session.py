@@ -3,11 +3,12 @@
 import json
 from pathlib import Path
 
-from dm_agent.present import format_inspection, format_transcript, render_html
+from dm_agent.present import format_inspection, format_stats, format_transcript, render_html
 from dm_agent.session import (
     SessionLog,
     load_events,
     resolve_session_file,
+    session_stats,
     summarize_session,
 )
 
@@ -62,6 +63,134 @@ def test_replay_prints_tool_results_without_rerunning(tmp_path: Path) -> None:
     assert summary["status"] == "final"
     assert summary["task"] == "fix it"
     assert summary["events"] == 5
+
+
+def test_session_stats_counts_turns_tools_and_clean_edits() -> None:
+    events = [
+        {
+            "session_id": "20260101T000000Z-abc",
+            "step": 0,
+            "kind": "session_start",
+            "task": "fix it",
+        },
+        {"step": 0, "kind": "user", "content": "fix it"},
+        {
+            "step": 1,
+            "kind": "thought",
+            "content": "read first",
+        },
+        {
+            "step": 1,
+            "kind": "tool_call",
+            "tool": "read_file",
+            "call_id": "c-read",
+            "arguments": {"path": "math_utils.py"},
+        },
+        {"step": 1, "kind": "tool_result", "tool": "read_file", "call_id": "c-read", "ok": True},
+        {
+            "step": 2,
+            "kind": "tool_call",
+            "tool": "edit_file",
+            "call_id": "c-fail",
+            "arguments": {"path": "missing.py"},
+        },
+        {
+            "step": 2,
+            "kind": "tool_result",
+            "tool": "edit_file",
+            "call_id": "c-fail",
+            "ok": False,
+            "output": "Not a file: missing.py",
+        },
+        {
+            "step": 2,
+            "kind": "tool_call",
+            "tool": "write_file",
+            "call_id": "c-write",
+            "arguments": {"path": "notes/out.txt"},
+        },
+        {"step": 2, "kind": "tool_result", "tool": "write_file", "call_id": "c-write", "ok": True},
+        {
+            "step": 3,
+            "kind": "tool_call",
+            "tool": "edit_file",
+            "call_id": "c-edit",
+            "arguments": {"path": "math_utils.py"},
+        },
+        {"step": 3, "kind": "tool_result", "tool": "edit_file", "call_id": "c-edit", "ok": True},
+        {
+            "step": 3,
+            "kind": "tool_call",
+            "tool": "edit_file",
+            "call_id": "c-edit-again",
+            "arguments": {"path": "math_utils.py"},
+        },
+        {
+            "step": 3,
+            "kind": "tool_result",
+            "tool": "edit_file",
+            "call_id": "c-edit-again",
+            "ok": True,
+        },
+        {"step": 4, "kind": "final", "content": "done"},
+    ]
+    stats = session_stats(events)
+    assert stats == {
+        "session_id": "20260101T000000Z-abc",
+        "turns": 4,
+        "ended_cleanly": True,
+        "tools": {"edit_file": 3, "read_file": 1, "write_file": 1},
+        "files": ["math_utils.py", "notes/out.txt"],
+    }
+    reordered = [events[0], events[1], *events[7:11], *events[2:7], *events[11:]]
+    assert session_stats(reordered) == stats
+    text = format_stats(stats)
+    assert text == format_stats(session_stats(reordered))
+    assert "turns 4" in text
+    assert "ended_cleanly yes" in text
+    assert "tools edit_file=3 read_file=1 write_file=1" in text
+    assert "math_utils.py" in text
+    assert "missing.py" not in text
+    assert "notes/out.txt" in text
+
+
+def test_session_stats_open_error_and_max_steps() -> None:
+    open_stats = session_stats(
+        [
+            {"session_id": "s", "step": 1, "kind": "tool_call", "tool": "search", "arguments": {"path": "."}},
+            {"step": 1, "kind": "tool_result", "tool": "search", "ok": True},
+            {
+                "step": 1,
+                "kind": "tool_call",
+                "tool": "write_file",
+                "call_id": "unpaired",
+                "arguments": {"path": "new.py"},
+            },
+        ]
+    )
+    assert open_stats["turns"] == 1
+    assert open_stats["ended_cleanly"] is False
+    assert open_stats["tools"] == {"search": 1, "write_file": 1}
+    assert open_stats["files"] == []
+    assert "files (none)" in format_stats(open_stats)
+
+    stopped = session_stats([{"step": 2, "kind": "max_steps", "content": "stopped"}])
+    assert stopped["turns"] == 1
+    assert stopped["ended_cleanly"] is False
+    assert "ended_cleanly no" in format_stats(stopped)
+
+    failed = session_stats(
+        [
+            {"step": 1, "kind": "error", "content": "boom"},
+            {"step": 2, "kind": "final", "content": "too late"},
+            {"step": 3, "kind": "error", "content": "still broken"},
+        ]
+    )
+    assert failed["turns"] == 3
+    assert failed["ended_cleanly"] is False
+    assert format_stats({}) == (
+        "session (unknown)\nturns 0\nended_cleanly no\ntools (none)\nfiles (none)\n"
+    )
 
 
 def test_html_escapes_markup(tmp_path: Path) -> None:

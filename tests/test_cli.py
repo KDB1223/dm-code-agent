@@ -87,11 +87,55 @@ def test_sessions_list_show_replay_and_html(monkeypatch, tmp_path: Path, capsys)
     assert "tools were not re-run" in replayed
     assert "step 1 tool_call read_file" in replayed
 
+    assert main(["sessions", "stats", log.session_id, "--workspace", str(tmp_path)]) == 0
+    summary = capsys.readouterr().out
+    assert "turns 2" in summary
+    assert "ended_cleanly yes" in summary
+    assert "tools read_file=1" in summary
+    assert "files (none)" in summary
+    assert "OPENAI" not in summary
+
     out = tmp_path / "session.html"
     assert main(["sessions", "html", log.session_id + ".jsonl", "--workspace", str(tmp_path), "--output", str(out)]) == 0
     document = out.read_text(encoding="utf-8")
     assert "<script>" not in document
     assert "&lt;script&gt;" in document
+
+
+def test_stats_json_is_offline_and_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log = _sample_log(tmp_path)
+    log.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c2",
+        arguments={"path": "a.py", "old": "print(1)", "new": "print(2)"},
+    )
+    # The sample log already closed with final at step 2. This extra edit is
+    # still in the file; the summary must follow the log, not re-run the tool.
+    log.append(kind="tool_result", step=2, tool="edit_file", call_id="c2", ok=True, output="Updated a.py")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("stats must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("stats must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+    assert main(["sessions", "stats", log.session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "stats", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    payload = json.loads(first)
+    assert payload["turns"] == 2
+    assert payload["ended_cleanly"] is True
+    assert payload["tools"] == {"edit_file": 1, "read_file": 1}
+    assert payload["files"] == ["a.py"]
+    assert "api_key" not in payload
 
 
 def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:

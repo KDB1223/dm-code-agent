@@ -12,7 +12,7 @@
 - **ReAct 循环。** 计划，调用工具，读取观察，重复，直到最终回答或达到步数上限。
 - **工作区工具。** 读、写、精确替换、列目录、搜索。Shell 会拒绝指向项目之外的路径。
 - **课程工具。** `lint_python` 报告语法错误、裸 `except`、残留的 `breakpoint()`。`run_pytest` 返回结构化的通过/失败计数。
-- **审计日志。** `.dm-agent/sessions/` 下的追加 JSONL，支持 `list`、`show`，以及不重新执行工具的干跑 `replay`。
+- **审计日志。** `.dm-agent/sessions/` 下的追加 JSONL，支持 `list`、`show`、`stats`，以及不重新执行工具的干跑 `replay`。
 - **离线评测。** 三个小题配有黄金检查。不需要 API key，`python -m evals.run` 应输出 `score 3/3`。
 
 **Topics:** `coding-agent` `react` `auditability` `local-first` `llm` `education`
@@ -72,8 +72,11 @@ python -m dm_agent run --workspace examples/demo_workspace \
   "$(cat examples/demo_workspace/TASK.txt)"
 python -m dm_agent sessions list --workspace examples/demo_workspace
 python -m dm_agent sessions show SESSION_ID --workspace examples/demo_workspace
+python -m dm_agent sessions stats SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
 ```
+
+`stats` 只读已有 JSONL，打印回合数、工具次数、成功的 `edit_file` / `write_file` 所记录的文件，以及会话是否以 `final` 结束。不需要 API key，也不会重新执行工具。加上 `--json` 时输出同一份摘要的 JSON。
 
 若 `dm-agent` 已在 `PATH` 上，可以把 `python -m dm_agent` 换成 `dm-agent`。
 
