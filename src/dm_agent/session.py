@@ -120,6 +120,86 @@ def resolve_session_file(log_dir: Path, token: str) -> Path:
     raise AgentError(f"session id is ambiguous: {names}")
 
 
+# Model steps. ``session_start`` and ``user`` are not turns.
+_TURN_KINDS = frozenset({"thought", "tool_call", "tool_result", "final", "max_steps", "error"})
+_TERMINAL_KINDS = frozenset({"final", "max_steps", "error"})
+# The log has no separate "files touched" field. These tools record a path
+# and change a file when the paired result is ok.
+_FILE_EDIT_TOOLS = frozenset({"edit_file", "write_file"})
+
+
+def session_stats(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """Summarize turns, tool counts, edited files, and a clean ending.
+
+    A turn is one model step: a distinct ``step`` >= 1 on a thought, tool
+    call, tool result, final answer, ``max_steps`` stop, or error. Several
+    tool calls that share a step are one turn.
+
+    Tool counts come from ``tool_call`` events, sorted by tool name.
+
+    Files are ``arguments.path`` values on successful ``edit_file`` and
+    ``write_file`` calls. Success means a ``tool_result`` with the same
+    ``call_id`` and ``ok`` true. Other tools are counted, but their paths
+    are not listed, because a read or a search does not record an edit.
+    The session ended cleanly when the last ``final``, ``max_steps``, or
+    ``error`` event is ``final``.
+    """
+    resolved_id = ""
+    turns: set[int] = set()
+    tool_counts: dict[str, int] = {}
+    result_ok: dict[str, bool] = {}
+    edit_calls: list[tuple[str, str]] = []
+
+    for event in events:
+        if resolved_id == "":
+            raw_id = event.get("session_id")
+            if isinstance(raw_id, str) and raw_id:
+                resolved_id = raw_id
+        kind = event.get("kind")
+        if kind in _TURN_KINDS:
+            step = event.get("step")
+            if isinstance(step, int) and not isinstance(step, bool) and step >= 1:
+                turns.add(step)
+        if kind == "tool_result":
+            call_id = event.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                result_ok[call_id] = event.get("ok") is True
+        elif kind == "tool_call":
+            tool = event.get("tool")
+            if isinstance(tool, str) and tool:
+                tool_counts[tool] = tool_counts.get(tool, 0) + 1
+            if tool in _FILE_EDIT_TOOLS:
+                arguments = event.get("arguments")
+                path = arguments.get("path") if isinstance(arguments, dict) else None
+                call_id = event.get("call_id")
+                if isinstance(path, str) and path and isinstance(call_id, str) and call_id:
+                    edit_calls.append((call_id, path))
+
+    last_terminal = ""
+    for event in events:
+        kind = event.get("kind")
+        if isinstance(kind, str) and kind in _TERMINAL_KINDS:
+            last_terminal = kind
+
+    files: list[str] = []
+    seen: set[str] = set()
+    for call_id, path in edit_calls:
+        if result_ok.get(call_id) is True and path not in seen:
+            seen.add(path)
+            files.append(path)
+    files.sort()
+
+    if resolved_id == "":
+        resolved_id = session_id
+    return {
+        "session_id": resolved_id,
+        "turns": len(turns),
+        "ended_cleanly": last_terminal == "final",
+        "tools": {name: tool_counts[name] for name in sorted(tool_counts)},
+        "files": files,
+    }
+
+
 def summarize_session(path: Path) -> dict[str, Any]:
     """Read a session file into a short row for ``sessions list``."""
     summary: dict[str, Any] = {

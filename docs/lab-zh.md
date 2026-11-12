@@ -72,6 +72,7 @@ export OPENAI_MODEL="gpt-4o-mini"
 dm-agent run --workspace examples/demo_workspace "$(cat examples/demo_workspace/TASK.txt)"
 dm-agent sessions list --workspace examples/demo_workspace
 dm-agent sessions show <id> --workspace examples/demo_workspace
+dm-agent sessions stats <id> --workspace examples/demo_workspace
 dm-agent sessions replay <id> --workspace examples/demo_workspace
 ```
 
@@ -90,6 +91,8 @@ examples/demo_workspace/.dm-agent/sessions/<id>.jsonl
 3. 找到随后的 `lint_python` 或 `run_pytest` 结果，确认最终回答不是在工具失败时结束的。
 
 `dm-agent sessions replay` 只重印这些行。它不会再次改文件。可以先复制一份 `math_utils.py`，再执行 replay，确认副本没有变化。
+
+`dm-agent sessions stats` 同样只读 JSONL。它打印模型回合数、各工具调用次数、成功写入或修改并已记录在日志里的文件路径，以及会话是否以 `final` 干净结束。不需要 API key，也不会重新执行工具。
 
 ### 3. 观察工作区禁闭
 

@@ -12,11 +12,12 @@ from dm_agent.agent import Agent
 from dm_agent.config import load_config
 from dm_agent.errors import AgentError, ConfigError, LLMError
 from dm_agent.llm import OpenAICompatibleLLM, public_base_url
-from dm_agent.present import format_inspection, format_transcript, render_html
+from dm_agent.present import format_inspection, format_stats, format_transcript, render_html
 from dm_agent.session import (
     iter_session_files,
     load_events,
     resolve_session_file,
+    session_stats,
     summarize_session,
 )
 from dm_agent.tools import build_registry
@@ -80,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("session_id", help="Session id or a unique prefix.")
     show.add_argument("--json", action="store_true", help="Print the raw JSONL file.")
     show.set_defaults(handler=cmd_show)
+
+    stats = session_sub.add_parser(
+        "stats",
+        parents=[common],
+        help="Summarize turns, tool counts, files edited, and whether the session ended cleanly.",
+    )
+    stats.add_argument("session_id", help="Session id or a unique prefix.")
+    stats.add_argument("--json", action="store_true", help="Print the summary as JSON.")
+    stats.set_defaults(handler=cmd_stats)
 
     replay = session_sub.add_parser(
         "replay",
@@ -181,6 +191,18 @@ def cmd_show(args: argparse.Namespace) -> int:
     events = load_events(path)
     print(f"file {path}")
     sys.stdout.write(format_inspection(events))
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Print a summary from the log. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    stats = session_stats(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_stats(stats))
     return 0
 
 

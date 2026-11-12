@@ -74,6 +74,29 @@ def format_transcript(events: list[dict[str, Any]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def format_stats(stats: dict[str, Any]) -> str:
+    """Compact text for ``sessions stats``. Field order is fixed."""
+    tools = stats.get("tools") or {}
+    names = sorted(str(name) for name in tools)
+    tool_text = " ".join(f"{name}={tools[name]}" for name in names) if names else "(none)"
+    files = sorted(str(path) for path in (stats.get("files") or []))
+    if files:
+        files_block = "files\n" + "\n".join(f"  {path}" for path in files)
+    else:
+        files_block = "files (none)"
+    ended = "yes" if stats.get("ended_cleanly") else "no"
+    session_id = str(stats.get("session_id") or "(unknown)")
+    turns = stats.get("turns", 0)
+    lines = [
+        f"session {session_id}",
+        f"turns {turns}",
+        f"ended_cleanly {ended}",
+        f"tools {tool_text}",
+        files_block,
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def render_html(events: list[dict[str, Any]]) -> str:
     """Self-contained HTML document. Every field is escaped."""
     session_id = html.escape(str(events[0].get("session_id", "session"))) if events else "session"

@@ -12,7 +12,7 @@ Hosted chat hides the tool trace. dm-agent keeps the trace on disk, next to the 
 - **ReAct loop.** Plan, call a tool, read the observation, repeat until a final answer or the step limit.
 - **Workspace tools.** Read, write, edit, list, and search. The shell refuses commands that point outside the project.
 - **Course tools.** `lint_python` reports syntax errors, bare `except`, and leftover `breakpoint()` calls. `run_pytest` returns a structured pass/fail summary.
-- **Audit log.** Append-only JSONL under `.dm-agent/sessions/`, with `list`, `show`, and a dry `replay` that does not re-run tools.
+- **Audit log.** Append-only JSONL under `.dm-agent/sessions/`, with `list`, `show`, `stats`, and a dry `replay` that does not re-run tools.
 - **Offline evals.** Three toy tasks with golden checks. `python -m evals.run` prints `score 3/3` without an API key.
 
 **Topics:** `coding-agent` `react` `auditability` `local-first` `llm` `education`
@@ -71,6 +71,7 @@ export OPENAI_MODEL="gpt-4o-mini"
 python -m dm_agent run --workspace examples/demo_workspace \
   "$(cat examples/demo_workspace/TASK.txt)"
 python -m dm_agent sessions list --workspace examples/demo_workspace
+python -m dm_agent sessions stats SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
 ```
 
@@ -169,6 +170,7 @@ python -m dm_agent run "task" --workspace PATH
 python -m dm_agent run - --workspace PATH          # task text from stdin
 python -m dm_agent sessions list --workspace PATH
 python -m dm_agent sessions show SESSION --workspace PATH
+python -m dm_agent sessions stats SESSION --workspace PATH
 python -m dm_agent sessions replay SESSION --workspace PATH
 python -m dm_agent sessions html SESSION --workspace PATH
 ```
@@ -201,6 +203,8 @@ Each line is one JSON object. Lines are appended and `fsync`'d. A crash keeps ev
 `kind` is one of `session_start`, `user`, `thought`, `tool_call`, `tool_result`, `final`, `max_steps`, `error`. A `tool_call` and its `tool_result` share `step` and `call_id`.
 
 `sessions show` prints every field. `sessions replay` prints the narrative transcript and states that tools were not re-run. `sessions html` writes a self-contained HTML file with the event text escaped.
+
+`sessions stats` reads the same JSONL and prints a fixed summary: model turns (distinct `step` values from 1 up), tool counts, files recorded on successful `edit_file` and `write_file` calls, and whether the last terminal event is `final`. It does not need an API key, and it does not call the model or re-run tools. `--json` prints that summary as JSON.
 
 ## Safety
 
