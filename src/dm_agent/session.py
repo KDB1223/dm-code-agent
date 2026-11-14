@@ -128,6 +128,35 @@ _TERMINAL_KINDS = frozenset({"final", "max_steps", "error"})
 _FILE_EDIT_TOOLS = frozenset({"edit_file", "write_file"})
 
 
+def _first_session_id(events: list[dict[str, Any]], fallback: str = "") -> str:
+    """First non-empty string ``session_id`` in ``events``, or ``fallback``."""
+    for event in events:
+        raw_id = event.get("session_id")
+        if isinstance(raw_id, str) and raw_id:
+            return raw_id
+    return fallback
+
+
+def _tool_result_ok(events: list[dict[str, Any]]) -> dict[str, bool]:
+    """Map each ``call_id`` to whether its last ``tool_result`` has ``ok`` true."""
+    result_ok: dict[str, bool] = {}
+    for event in events:
+        if event.get("kind") != "tool_result":
+            continue
+        call_id = event.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            result_ok[call_id] = event.get("ok") is True
+    return result_ok
+
+
+def _event_step(event: dict[str, Any]) -> int | None:
+    """Integer ``step`` from an event. Bools and other types are missing."""
+    step = event.get("step")
+    if isinstance(step, int) and not isinstance(step, bool):
+        return step
+    return None
+
+
 def session_stats(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
     """Summarize turns, tool counts, edited files, and a clean ending.
 
@@ -144,36 +173,29 @@ def session_stats(events: list[dict[str, Any]], *, session_id: str = "") -> dict
     The session ended cleanly when the last ``final``, ``max_steps``, or
     ``error`` event is ``final``.
     """
-    resolved_id = ""
     turns: set[int] = set()
     tool_counts: dict[str, int] = {}
-    result_ok: dict[str, bool] = {}
+    result_ok = _tool_result_ok(events)
     edit_calls: list[tuple[str, str]] = []
 
     for event in events:
-        if resolved_id == "":
-            raw_id = event.get("session_id")
-            if isinstance(raw_id, str) and raw_id:
-                resolved_id = raw_id
         kind = event.get("kind")
         if kind in _TURN_KINDS:
-            step = event.get("step")
-            if isinstance(step, int) and not isinstance(step, bool) and step >= 1:
+            step = _event_step(event)
+            if step is not None and step >= 1:
                 turns.add(step)
-        if kind == "tool_result":
-            call_id = event.get("call_id")
-            if isinstance(call_id, str) and call_id:
-                result_ok[call_id] = event.get("ok") is True
-        elif kind == "tool_call":
-            tool = event.get("tool")
-            if isinstance(tool, str) and tool:
-                tool_counts[tool] = tool_counts.get(tool, 0) + 1
-            if tool in _FILE_EDIT_TOOLS:
-                arguments = event.get("arguments")
-                path = arguments.get("path") if isinstance(arguments, dict) else None
-                call_id = event.get("call_id")
-                if isinstance(path, str) and path and isinstance(call_id, str) and call_id:
-                    edit_calls.append((call_id, path))
+        if kind != "tool_call":
+            continue
+        tool = event.get("tool")
+        if isinstance(tool, str) and tool:
+            tool_counts[tool] = tool_counts.get(tool, 0) + 1
+        if tool not in _FILE_EDIT_TOOLS:
+            continue
+        arguments = event.get("arguments")
+        path = arguments.get("path") if isinstance(arguments, dict) else None
+        call_id = event.get("call_id")
+        if isinstance(path, str) and path and isinstance(call_id, str) and call_id:
+            edit_calls.append((call_id, path))
 
     last_terminal = ""
     for event in events:
@@ -189,14 +211,84 @@ def session_stats(events: list[dict[str, Any]], *, session_id: str = "") -> dict
             files.append(path)
     files.sort()
 
-    if resolved_id == "":
-        resolved_id = session_id
     return {
-        "session_id": resolved_id,
+        "session_id": _first_session_id(events, session_id),
         "turns": len(turns),
         "ended_cleanly": last_terminal == "final",
         "tools": {name: tool_counts[name] for name in sorted(tool_counts)},
         "files": files,
+    }
+
+
+def session_changes(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """List successful ``edit_file`` and ``write_file`` mutations in log order.
+
+    A change is a ``tool_call`` for one of those tools whose ``tool_result``
+    shares ``call_id`` and has ``ok`` true, and whose arguments describe the
+    mutation. ``edit_file`` needs a non-empty ``path`` and string ``old`` and
+    ``new``. ``write_file`` needs a non-empty ``path`` and string ``content``
+    (content may be empty). ``replace_all`` is kept when it is a boolean and
+    is otherwise false.
+
+    Failed results, unpaired calls, other tools, and calls missing those
+    arguments are omitted. The same path is listed once per successful call.
+    This reads the log only. It does not diff the workspace.
+    """
+    result_ok = _tool_result_ok(events)
+    changes: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("kind") != "tool_call":
+            continue
+        tool = event.get("tool")
+        if tool not in _FILE_EDIT_TOOLS:
+            continue
+        call_id = event.get("call_id")
+        if not isinstance(call_id, str) or call_id == "":
+            continue
+        if result_ok.get(call_id) is not True:
+            continue
+        arguments = event.get("arguments")
+        if not isinstance(arguments, dict):
+            continue
+        path = arguments.get("path")
+        if not isinstance(path, str) or path == "":
+            continue
+        step = _event_step(event)
+        if tool == "edit_file":
+            old = arguments.get("old")
+            new = arguments.get("new")
+            if not isinstance(old, str) or not isinstance(new, str):
+                continue
+            replace_all = arguments.get("replace_all", False)
+            if not isinstance(replace_all, bool):
+                replace_all = False
+            changes.append(
+                {
+                    "tool": "edit_file",
+                    "path": path,
+                    "step": step,
+                    "call_id": call_id,
+                    "old": old,
+                    "new": new,
+                    "replace_all": replace_all,
+                }
+            )
+        elif tool == "write_file":
+            content = arguments.get("content")
+            if not isinstance(content, str):
+                continue
+            changes.append(
+                {
+                    "tool": "write_file",
+                    "path": path,
+                    "step": step,
+                    "call_id": call_id,
+                    "content": content,
+                }
+            )
+    return {
+        "session_id": _first_session_id(events, session_id),
+        "changes": changes,
     }
 
 
