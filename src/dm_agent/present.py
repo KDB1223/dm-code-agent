@@ -1,7 +1,7 @@
 """Human-readable rendering of a session log.
 
-Both renderers are pure: they print what the log already recorded. Replay
-does not import or call tools.
+Renderers are pure: they print what the log already recorded. They do not
+import or call tools.
 """
 
 from __future__ import annotations
@@ -72,6 +72,57 @@ def format_transcript(events: list[dict[str, Any]]) -> str:
         "# replay complete (tool results printed from the log; tools were not re-run)"
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _change_header(index: int, change: dict[str, Any]) -> str:
+    parts = [
+        f"change {index}",
+        str(change.get("tool") or ""),
+        f"path={change.get('path', '')}",
+    ]
+    step = change.get("step")
+    if isinstance(step, int) and not isinstance(step, bool):
+        parts.append(f"step={step}")
+    call_id = change.get("call_id")
+    if isinstance(call_id, str) and call_id:
+        parts.append(f"call_id={call_id}")
+    if change.get("tool") == "edit_file" and change.get("replace_all") is True:
+        parts.append("replace_all=true")
+    return " ".join(parts)
+
+
+def _labeled_text(label: str, value: Any) -> str:
+    """Label plus the raw field. A leading or trailing newline stays a blank line."""
+    text = value if isinstance(value, str) else ""
+    if text == "":
+        return f"{label}:\n"
+    return f"{label}:\n{text}\n"
+
+
+def format_changes(payload: dict[str, Any]) -> str:
+    """Text for ``sessions changes``. Field order is fixed.
+
+    Zero changes are two lines and a trailing newline. Each later change is
+    separated by one blank line. ``replace_all=true`` is appended only when
+    that flag is true. A missing step or call id is left out of the header.
+    """
+    session_id = str(payload.get("session_id") or "(unknown)")
+    raw_changes = payload.get("changes") or []
+    changes = raw_changes if isinstance(raw_changes, list) else []
+    head = f"session {session_id}\nchanges {len(changes)}\n"
+    if not changes:
+        return head
+    blocks: list[str] = []
+    for index, change in enumerate(changes, start=1):
+        item = change if isinstance(change, dict) else {}
+        if item.get("tool") == "write_file":
+            body = _labeled_text("content", item.get("content", ""))
+        else:
+            body = _labeled_text("old", item.get("old", "")) + _labeled_text(
+                "new", item.get("new", "")
+            )
+        blocks.append(f"{_change_header(index, item)}\n{body}")
+    return head + "\n" + "\n".join(blocks)
 
 
 def format_stats(stats: dict[str, Any]) -> str:

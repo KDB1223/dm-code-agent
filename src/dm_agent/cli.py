@@ -12,11 +12,18 @@ from dm_agent.agent import Agent
 from dm_agent.config import load_config
 from dm_agent.errors import AgentError, ConfigError, LLMError
 from dm_agent.llm import OpenAICompatibleLLM, public_base_url
-from dm_agent.present import format_inspection, format_stats, format_transcript, render_html
+from dm_agent.present import (
+    format_changes,
+    format_inspection,
+    format_stats,
+    format_transcript,
+    render_html,
+)
 from dm_agent.session import (
     iter_session_files,
     load_events,
     resolve_session_file,
+    session_changes,
     session_stats,
     summarize_session,
 )
@@ -90,6 +97,15 @@ def build_parser() -> argparse.ArgumentParser:
     stats.add_argument("session_id", help="Session id or a unique prefix.")
     stats.add_argument("--json", action="store_true", help="Print the summary as JSON.")
     stats.set_defaults(handler=cmd_stats)
+
+    changes = session_sub.add_parser(
+        "changes",
+        parents=[common],
+        help="List successful edit_file and write_file mutations recorded in the log.",
+    )
+    changes.add_argument("session_id", help="Session id or a unique prefix.")
+    changes.add_argument("--json", action="store_true", help="Print the changes as JSON.")
+    changes.set_defaults(handler=cmd_changes)
 
     replay = session_sub.add_parser(
         "replay",
@@ -203,6 +219,18 @@ def cmd_stats(args: argparse.Namespace) -> int:
         return 0
     print(f"file {path}")
     sys.stdout.write(format_stats(stats))
+    return 0
+
+
+def cmd_changes(args: argparse.Namespace) -> int:
+    """Print recorded file mutations. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    payload = session_changes(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_changes(payload))
     return 0
 
 
