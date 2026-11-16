@@ -6,6 +6,7 @@ from pathlib import Path
 from dm_agent.present import (
     format_changes,
     format_inspection,
+    format_patch,
     format_stats,
     format_transcript,
     render_html,
@@ -15,6 +16,7 @@ from dm_agent.session import (
     load_events,
     resolve_session_file,
     session_changes,
+    session_patch,
     session_stats,
     summarize_session,
 )
@@ -533,6 +535,315 @@ def test_session_changes_empty_events() -> None:
     )
     assert fallback == {"session_id": "from-stem", "changes": []}
     assert format_changes(fallback) == "session from-stem\nchanges 0\n"
+
+
+def _call(step: int, tool: str, call_id: str, arguments: dict) -> dict:
+    return {
+        "step": step,
+        "kind": "tool_call",
+        "tool": tool,
+        "call_id": call_id,
+        "arguments": arguments,
+    }
+
+
+def _ok(step: int, call_id: str, *, ok: bool = True) -> dict:
+    return {"step": step, "kind": "tool_result", "call_id": call_id, "ok": ok}
+
+
+def test_session_patch_edit_file_hunks() -> None:
+    events = [
+        {"session_id": "s", "step": 0, "kind": "session_start", "task": "edit"},
+        _call(
+            2,
+            "edit_file",
+            "c-one",
+            {"path": "a.py", "old": "print(1)\n", "new": "print(2)\n"},
+        ),
+        _ok(2, "c-one"),
+        _call(
+            3,
+            "edit_file",
+            "c-multi",
+            {
+                "path": "a.py",
+                "old": "alpha\nbeta\n",
+                "new": "alpha\ngamma\n",
+            },
+        ),
+        _ok(3, "c-multi"),
+        _call(
+            4,
+            "edit_file",
+            "c-insert",
+            {"path": "new.py", "old": "", "new": "added\n"},
+        ),
+        _ok(4, "c-insert"),
+        _call(
+            4,
+            "edit_file",
+            "c-delete",
+            {"path": "old.py", "old": "gone\n", "new": ""},
+        ),
+        _ok(4, "c-delete"),
+    ]
+    payload = session_patch(events)
+    assert list(payload) == ["session_id", "patches"]
+    assert [item["call_id"] for item in payload["patches"]] == [
+        "c-one",
+        "c-multi",
+        "c-insert",
+        "c-delete",
+    ]
+    assert list(payload["patches"][0]) == [
+        "tool",
+        "path",
+        "step",
+        "call_id",
+        "old",
+        "new",
+        "replace_all",
+        "diff",
+    ]
+    single = (
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-print(1)\n"
+        "+print(2)\n"
+    )
+    multi = (
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-alpha\n"
+        "-beta\n"
+        "+alpha\n"
+        "+gamma\n"
+    )
+    inserted = (
+        "--- a/new.py\n"
+        "+++ b/new.py\n"
+        "@@ -1,0 +1,1 @@\n"
+        "+added\n"
+    )
+    deleted = (
+        "--- a/old.py\n"
+        "+++ b/old.py\n"
+        "@@ -1,1 +1,0 @@\n"
+        "-gone\n"
+    )
+    assert payload["patches"][0]["diff"] == single
+    assert payload["patches"][1]["diff"] == multi
+    assert payload["patches"][2]["diff"] == inserted
+    assert payload["patches"][3]["diff"] == deleted
+    # Same path, two calls: two diffs, not one merged file.
+    assert payload["patches"][0]["path"] == payload["patches"][1]["path"] == "a.py"
+    assert single.count("--- a/a.py") == 1
+    text = format_patch(payload)
+    joined = "\n".join(item["diff"] for item in payload["patches"])
+    assert text == f"session s\npatches 4\n\n{joined}"
+    assert text.count("--- a/a.py\n") == 2
+
+
+def test_session_patch_write_file_hunks() -> None:
+    events = [
+        {"session_id": "s", "step": 3, "kind": "user", "content": "write"},
+        _call(3, "write_file", "c-write", {"path": "notes/out.txt", "content": "你好"}),
+        _ok(3, "c-write"),
+        _call(4, "write_file", "c-nl", {"path": "notes/out.txt", "content": "你好\n"}),
+        _ok(4, "c-nl"),
+        _call(5, "write_file", "c-empty", {"path": "notes/blank.txt", "content": ""}),
+        _ok(5, "c-empty"),
+    ]
+    payload = session_patch(events)
+    assert list(payload["patches"][0]) == [
+        "tool",
+        "path",
+        "step",
+        "call_id",
+        "content",
+        "diff",
+    ]
+    assert "old" not in payload["patches"][0]
+    assert "replace_all" not in payload["patches"][0]
+    unicode_diff = (
+        "--- /dev/null\n"
+        "+++ b/notes/out.txt\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+你好\n"
+        "\\ No newline at end of file\n"
+    )
+    newline_diff = (
+        "--- /dev/null\n"
+        "+++ b/notes/out.txt\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+你好\n"
+    )
+    empty_diff = (
+        "--- /dev/null\n"
+        "+++ b/notes/blank.txt\n"
+        "@@ -0,0 +0,0 @@\n"
+    )
+    assert payload["patches"][0]["content"] == "你好"
+    assert payload["patches"][0]["diff"] == unicode_diff
+    assert payload["patches"][1]["diff"] == newline_diff
+    assert payload["patches"][2]["diff"] == empty_diff
+    assert payload["patches"][2]["content"] == ""
+    text = format_patch(payload)
+    assert text == (
+        "session s\npatches 3\n\n" + "\n".join(item["diff"] for item in payload["patches"])
+    )
+
+
+def test_session_patch_skips_failed_unpaired_and_incomplete_calls(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = [
+        {"session_id": "s", "step": 1, "kind": "thought", "content": "edit"},
+        _call(1, "edit_file", "c-fail", {"path": "math_utils.py", "old": "a", "new": "b"}),
+        _ok(1, "c-fail", ok=False),
+        _call(1, "write_file", "c-unpaired", {"path": "notes/out.txt", "content": "nope"}),
+        _call(2, "edit_file", "c-missing", {"path": "math_utils.py"}),
+        _ok(2, "c-missing"),
+        _call(2, "write_file", "c-bad-content", {"path": "notes/out.txt", "content": None}),
+        _ok(2, "c-bad-content"),
+        _call(2, "write_file", "c-empty-path", {"path": "", "content": "x"}),
+        _ok(2, "c-empty-path"),
+        _call(2, "edit_file", "c-num-ok", {"path": "num.py", "old": "a", "new": "b"}),
+        {"step": 2, "kind": "tool_result", "call_id": "c-num-ok", "ok": 1},
+        _call(2, "write_file", "c-no-args", {}),
+        _ok(2, "c-no-args"),
+        _call(3, "search", "c-search", {"path": "math_utils.py"}),
+        _ok(3, "c-search"),
+        _call(
+            4,
+            "edit_file",
+            "c-first",
+            {"path": "math_utils.py", "old": "return a - b\n", "new": "return a + b\n"},
+        ),
+        _ok(4, "c-first"),
+        _call(6, "lint_python", "c-lint", {"path": "math_utils.py"}),
+        _ok(6, "c-lint"),
+        _call(7, "write_file", "c-later", {"path": "notes/out.txt", "content": "later"}),
+    ]
+    changes = session_changes(events)
+    payload = session_patch(events)
+    assert payload["session_id"] == changes["session_id"] == "s"
+    assert [item["call_id"] for item in payload["patches"]] == ["c-first"]
+    assert [item["call_id"] for item in changes["changes"]] == ["c-first"]
+    for key, value in changes["changes"][0].items():
+        assert payload["patches"][0][key] == value
+    text = format_patch(payload)
+    for omitted in ("c-fail", "c-unpaired", "c-missing", "c-later", "nope", "later", "search"):
+        assert omitted not in text
+    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / "math_utils.py").exists()
+    assert not (tmp_path / "notes").exists()
+
+
+def test_session_patch_replace_all_is_annotated_once() -> None:
+    events = [
+        {"session_id": "s"},
+        _call(
+            2,
+            "edit_file",
+            "c-one",
+            {"path": "a.py", "old": "token\n", "new": "other\n", "replace_all": False},
+        ),
+        _ok(2, "c-one"),
+        _call(
+            3,
+            "edit_file",
+            "c-all",
+            {"path": "b.py", "old": "token\n", "new": "other\n", "replace_all": True},
+        ),
+        _ok(3, "c-all"),
+    ]
+    payload = session_patch(events)
+    assert payload["patches"][0]["replace_all"] is False
+    assert payload["patches"][1]["replace_all"] is True
+    assert "# replace_all" not in payload["patches"][0]["diff"]
+    flagged = payload["patches"][1]["diff"]
+    assert flagged.startswith("# replace_all=true\n--- a/b.py\n+++ b/b.py\n")
+    assert flagged.splitlines().count("-token") == 1
+    assert flagged.splitlines().count("+other") == 1
+    text = format_patch(payload)
+    assert text.count("# replace_all=true") == 1
+    assert "# replace_all=false" not in text
+    assert "# replace_all=true\n--- a/b.py\n" in text
+    assert text == (
+        "session s\npatches 2\n\n" + "\n".join(item["diff"] for item in payload["patches"])
+    )
+
+
+def test_session_patch_marks_missing_newlines() -> None:
+    events = [
+        {"session_id": "s"},
+        _call(1, "edit_file", "c-old", {"path": "old.py", "old": "print(1)", "new": "print(2)\n"}),
+        _ok(1, "c-old"),
+        _call(2, "edit_file", "c-new", {"path": "new.py", "old": "print(1)\n", "new": "print(2)"}),
+        _ok(2, "c-new"),
+        _call(3, "edit_file", "c-both", {"path": "a.py", "old": "print(1)", "new": "print(2)"}),
+        _ok(3, "c-both"),
+        _call(
+            4,
+            "edit_file",
+            "c-multi",
+            {"path": "snip.py", "old": "line one\nline two", "new": "\nline three"},
+        ),
+        _ok(4, "c-multi"),
+    ]
+    diffs = [item["diff"] for item in session_patch(events)["patches"]]
+    assert diffs[0] == (
+        "--- a/old.py\n"
+        "+++ b/old.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-print(1)\n"
+        "\\ No newline at end of file\n"
+        "+print(2)\n"
+    )
+    assert diffs[1] == (
+        "--- a/new.py\n"
+        "+++ b/new.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-print(1)\n"
+        "+print(2)\n"
+        "\\ No newline at end of file\n"
+    )
+    assert diffs[2] == (
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-print(1)\n"
+        "\\ No newline at end of file\n"
+        "+print(2)\n"
+        "\\ No newline at end of file\n"
+    )
+    assert diffs[3] == (
+        "--- a/snip.py\n"
+        "+++ b/snip.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-line one\n"
+        "-line two\n"
+        "\\ No newline at end of file\n"
+        "+\n"
+        "+line three\n"
+        "\\ No newline at end of file\n"
+    )
+
+
+def test_session_patch_empty_events() -> None:
+    assert session_patch([]) == {"session_id": "", "patches": []}
+    assert format_patch(session_patch([])) == "session (unknown)\npatches 0\n"
+    assert format_patch({"session_id": "s", "patches": []}) == "session s\npatches 0\n"
+    fallback = session_patch(
+        [{"kind": "final", "step": 1, "content": "done"}],
+        session_id="from-stem",
+    )
+    assert fallback == {"session_id": "from-stem", "patches": []}
+    assert format_patch(fallback) == "session from-stem\npatches 0\n"
 
 
 def test_html_escapes_markup(tmp_path: Path) -> None:

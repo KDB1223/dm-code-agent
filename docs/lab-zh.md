@@ -74,6 +74,7 @@ dm-agent sessions list --workspace examples/demo_workspace
 dm-agent sessions show <id> --workspace examples/demo_workspace
 dm-agent sessions stats <id> --workspace examples/demo_workspace
 dm-agent sessions changes <id> --workspace examples/demo_workspace
+dm-agent sessions patch <id> --workspace examples/demo_workspace
 dm-agent sessions replay <id> --workspace examples/demo_workspace
 ```
 
@@ -96,6 +97,8 @@ examples/demo_workspace/.dm-agent/sessions/<id>.jsonl
 `dm-agent sessions stats` 同样只读 JSONL。它打印模型回合数、各工具调用次数、成功写入或修改并已记录在日志里的文件路径，以及会话是否以 `final` 干净结束。不需要 API key，也不会重新执行工具。
 
 `dm-agent sessions changes` 只读 JSONL，按日志顺序打印已记录的成功 `edit_file` 和 `write_file` 变更（路径，以及替换文本或写入内容）。它不重新执行工具，也不对照当前工作区文件重算 diff。
+
+`dm-agent sessions patch` 只读同一份 JSONL，把 `changes` 会列出的成功修改打成 unified diff。片段来自日志里记下的参数，不是对照当前工作区重算的 diff。`write_file` 显示为记下内容的整文件新增，而不是删掉写入前的旧字节。它不重新执行工具，也不需要 API key。
 
 ### 3. 观察工作区禁闭
 

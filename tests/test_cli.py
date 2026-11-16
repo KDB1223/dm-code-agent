@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from dm_agent.cli import main
-from dm_agent.present import format_changes
-from dm_agent.session import SessionLog, load_events, session_changes
+from dm_agent.present import format_changes, format_patch
+from dm_agent.session import SessionLog, load_events, session_changes, session_patch
 
 
 def _isolate(monkeypatch, tmp_path: Path) -> None:
@@ -227,6 +227,109 @@ def test_changes_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path,
     assert text == f"file {log.path}\n" + format_changes(expected)
     assert "change 1 edit_file path=a.py step=2 call_id=c-edit\n" in text
     assert "你好" in text
+
+
+def test_patch_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log = _sample_log(tmp_path)
+    log.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c-edit",
+        arguments={"path": "a.py", "old": "print(1)", "new": "print(2)"},
+    )
+    log.append(
+        kind="tool_result",
+        step=2,
+        tool="edit_file",
+        call_id="c-edit",
+        ok=True,
+        output="Updated a.py",
+    )
+    log.append(
+        kind="tool_call",
+        step=3,
+        tool="edit_file",
+        call_id="c-fail",
+        arguments={"path": "a.py", "old": "missing", "new": "nope"},
+    )
+    log.append(
+        kind="tool_result",
+        step=3,
+        tool="edit_file",
+        call_id="c-fail",
+        ok=False,
+        output="old string was not found",
+    )
+    log.append(
+        kind="tool_call",
+        step=3,
+        tool="write_file",
+        call_id="c-write",
+        arguments={"path": "notes/out.txt", "content": "你好"},
+    )
+    log.append(
+        kind="tool_result",
+        step=3,
+        tool="write_file",
+        call_id="c-write",
+        ok=True,
+        output="Wrote 6 bytes to notes/out.txt",
+    )
+    log.append(
+        kind="tool_call",
+        step=4,
+        tool="write_file",
+        call_id="c-open",
+        arguments={"path": "notes/out.txt", "content": "later"},
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("patch must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("patch must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    assert main(["sessions", "patch", log.session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "patch", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    expected = session_patch(load_events(log.path), session_id=log.session_id)
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    payload = json.loads(first)
+    assert payload["session_id"] == log.session_id
+    assert [item["call_id"] for item in payload["patches"]] == ["c-edit", "c-write"]
+    assert payload["patches"][0]["replace_all"] is False
+    assert payload["patches"][1]["content"] == "你好"
+    assert "\\u" not in first
+    assert "c-fail" not in first
+    assert "later" not in first
+    assert "--- a/a.py\n" in payload["patches"][0]["diff"]
+    assert "--- /dev/null\n" in payload["patches"][1]["diff"]
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "notes").exists()
+
+    assert main(["sessions", "patch", log.session_id, "--workspace", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert text == f"file {log.path}\n" + format_patch(expected)
+    assert "你好" in text
+    joined = "\n".join(item["diff"] for item in expected["patches"])
+    assert format_patch(expected) == f"session {log.session_id}\npatches 2\n\n{joined}"
+
+
+def test_sessions_help_lists_patch(capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["sessions", "--help"])
+    assert caught.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "{list,show,stats,changes,patch,replay,html}" in help_text
+    assert "unified diffs" in help_text
 
 
 def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:

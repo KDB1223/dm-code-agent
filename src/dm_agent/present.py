@@ -125,6 +125,28 @@ def format_changes(payload: dict[str, Any]) -> str:
     return head + "\n" + "\n".join(blocks)
 
 
+def format_patch(payload: dict[str, Any]) -> str:
+    """Text for ``sessions patch``. Field order is fixed.
+
+    Zero patches are two lines and a trailing newline. Otherwise a blank
+    line, then each item's ``diff`` joined by one blank line. Those strings
+    already end with a newline. A ``# replace_all=true`` line, when the
+    flag is set, is already the first line of that item's ``diff``.
+    """
+    session_id = str(payload.get("session_id") or "(unknown)")
+    raw_patches = payload.get("patches") or []
+    patches = raw_patches if isinstance(raw_patches, list) else []
+    head = f"session {session_id}\npatches {len(patches)}\n"
+    if not patches:
+        return head
+    diffs: list[str] = []
+    for patch in patches:
+        item = patch if isinstance(patch, dict) else {}
+        diff = item.get("diff", "")
+        diffs.append(diff if isinstance(diff, str) else "")
+    return head + "\n" + "\n".join(diffs)
+
+
 def format_stats(stats: dict[str, Any]) -> str:
     """Compact text for ``sessions stats``. Field order is fixed."""
     tools = stats.get("tools") or {}

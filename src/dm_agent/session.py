@@ -292,6 +292,123 @@ def session_changes(events: list[dict[str, Any]], *, session_id: str = "") -> di
     }
 
 
+def _recorded_lines(text: str) -> tuple[list[str], bool]:
+    """Split ``text`` on ``\\n`` and report whether it ends with a newline.
+
+    An empty string has no lines. The flag is meaningful only when there is
+    at least one line: a missing final newline is marked in the unified diff.
+    Other separators, including ``\\r``, stay on the line.
+    """
+    if text == "":
+        return [], True
+    ends_nl = text.endswith("\n")
+    body = text[:-1] if ends_nl else text
+    return body.split("\n"), ends_nl
+
+
+def _prefixed_lines(prefix: str, lines: list[str], *, ends_nl: bool) -> list[str]:
+    """Hunk lines for one side. No lines means no ``\\ No newline`` marker."""
+    if not lines:
+        return []
+    rendered = [prefix + line for line in lines]
+    if not ends_nl:
+        rendered.append("\\ No newline at end of file")
+    return rendered
+
+
+def _edit_diff(path: str, old: str, new: str, *, replace_all: bool) -> str:
+    """Snippet hunk. Counts are always written, including 0 and 1.
+
+    The log has no file line numbers and no surrounding context, so both
+    sides start at line 1 of the recorded snippet. ``replace_all`` is not
+    expanded; when it is true a single comment sits above the file header.
+    """
+    old_lines, old_nl = _recorded_lines(old)
+    new_lines, new_nl = _recorded_lines(new)
+    hunk = [
+        f"--- a/{path}",
+        f"+++ b/{path}",
+        f"@@ -1,{len(old_lines)} +1,{len(new_lines)} @@",
+        *_prefixed_lines("-", old_lines, ends_nl=old_nl),
+        *_prefixed_lines("+", new_lines, ends_nl=new_nl),
+    ]
+    text = "\n".join(hunk) + "\n"
+    if replace_all:
+        text = "# replace_all=true\n" + text
+    return text
+
+
+def _write_diff(path: str, content: str) -> str:
+    """Full-file add of recorded ``content``. Previous bytes are not in the log."""
+    lines, ends_nl = _recorded_lines(content)
+    if lines:
+        header = f"@@ -0,0 +1,{len(lines)} @@"
+    else:
+        header = "@@ -0,0 +0,0 @@"
+    hunk = [
+        "--- /dev/null",
+        f"+++ b/{path}",
+        header,
+        *_prefixed_lines("+", lines, ends_nl=ends_nl),
+    ]
+    return "\n".join(hunk) + "\n"
+
+
+def session_patch(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """Turn the mutations from ``session_changes`` into unified diffs.
+
+    Which calls are included is exactly ``session_changes``: successful
+    ``edit_file`` and ``write_file`` calls, in log order, one entry per
+    call. The diff is rebuilt from the logged arguments. It is not a diff
+    of the workspace, and this function does not read or write files.
+
+    ``edit_file`` is a snippet hunk (``@@ -1,N +1,M @@``). A side with no
+    lines uses start 1 and count 0. Every hunk line is ``-`` or ``+``.
+    ``write_file`` is a full-file add of the recorded ``content``
+    (``--- /dev/null``), not a deletion of any previous workspace bytes.
+    Empty content is an empty new-file hunk (``@@ -0,0 +0,0 @@``).
+
+    If a side has lines and does not end with a newline, ``\\ No newline
+    at end of file`` follows that side's last line. ``replace_all`` is
+    copied through and is not expanded into extra hunks. When it is true,
+    the ``diff`` string starts with ``# replace_all=true`` so the text
+    form can show it without changing the hunk body.
+    """
+    changes = session_changes(events, session_id=session_id)
+    return {
+        "session_id": changes["session_id"],
+        "patches": [_patch_from_change(change) for change in changes["changes"]],
+    }
+
+
+def _patch_from_change(change: dict[str, Any]) -> dict[str, Any]:
+    """One ``session_changes`` entry plus the ``diff`` string for that entry."""
+    if change["tool"] == "write_file":
+        return {
+            "tool": "write_file",
+            "path": change["path"],
+            "step": change["step"],
+            "call_id": change["call_id"],
+            "content": change["content"],
+            "diff": _write_diff(change["path"], change["content"]),
+        }
+    return {
+        "tool": "edit_file",
+        "path": change["path"],
+        "step": change["step"],
+        "call_id": change["call_id"],
+        "old": change["old"],
+        "new": change["new"],
+        "replace_all": change["replace_all"],
+        "diff": _edit_diff(
+            change["path"],
+            change["old"],
+            change["new"],
+            replace_all=change["replace_all"] is True,
+        ),
+    }
+
+
 def summarize_session(path: Path) -> dict[str, Any]:
     """Read a session file into a short row for ``sessions list``."""
     summary: dict[str, Any] = {
