@@ -15,6 +15,7 @@ from dm_agent.llm import OpenAICompatibleLLM, public_base_url
 from dm_agent.present import (
     format_changes,
     format_inspection,
+    format_patch,
     format_stats,
     format_transcript,
     render_html,
@@ -24,6 +25,7 @@ from dm_agent.session import (
     load_events,
     resolve_session_file,
     session_changes,
+    session_patch,
     session_stats,
     summarize_session,
 )
@@ -106,6 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
     changes.add_argument("session_id", help="Session id or a unique prefix.")
     changes.add_argument("--json", action="store_true", help="Print the changes as JSON.")
     changes.set_defaults(handler=cmd_changes)
+
+    patch = session_sub.add_parser(
+        "patch",
+        parents=[common],
+        help="Print unified diffs reconstructed from logged edit_file and write_file calls.",
+    )
+    patch.add_argument("session_id", help="Session id or a unique prefix.")
+    patch.add_argument("--json", action="store_true", help="Print the patches as JSON.")
+    patch.set_defaults(handler=cmd_patch)
 
     replay = session_sub.add_parser(
         "replay",
@@ -231,6 +242,18 @@ def cmd_changes(args: argparse.Namespace) -> int:
         return 0
     print(f"file {path}")
     sys.stdout.write(format_changes(payload))
+    return 0
+
+
+def cmd_patch(args: argparse.Namespace) -> int:
+    """Print unified diffs from the log. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    payload = session_patch(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_patch(payload))
     return 0
 
 
