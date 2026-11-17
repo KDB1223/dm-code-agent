@@ -6,8 +6,14 @@ from pathlib import Path
 import pytest
 
 from dm_agent.cli import main
-from dm_agent.present import format_changes, format_patch
-from dm_agent.session import SessionLog, load_events, session_changes, session_patch
+from dm_agent.present import format_changes, format_files, format_patch
+from dm_agent.session import (
+    SessionLog,
+    load_events,
+    session_changes,
+    session_files,
+    session_patch,
+)
 
 
 def _isolate(monkeypatch, tmp_path: Path) -> None:
@@ -323,13 +329,111 @@ def test_patch_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, c
     assert format_patch(expected) == f"session {log.session_id}\npatches 2\n\n{joined}"
 
 
+def test_files_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log = _sample_log(tmp_path)
+    log.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        arguments={"path": "a.py", "old": "missing", "new": "nope"},
+    )
+    log.append(
+        kind="tool_result",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        ok=False,
+        output="old string was not found",
+    )
+    log.append(
+        kind="tool_call",
+        step=3,
+        tool="write_file",
+        call_id="c-open",
+        arguments={"path": "notes/你好.txt", "content": "你好"},
+    )
+    log.append(
+        kind="tool_call",
+        step=4,
+        tool="run_shell",
+        call_id="c-shell",
+        arguments={"command": "pytest -q"},
+    )
+    log.append(
+        kind="tool_result",
+        step=4,
+        tool="run_shell",
+        call_id="c-shell",
+        ok=True,
+        output="passed",
+    )
+    log.append(
+        kind="tool_call",
+        step=5,
+        tool="search",
+        call_id="c-search",
+        arguments={"path": "notes/你好.txt", "query": "你好"},
+    )
+    log.append(
+        kind="tool_result",
+        step=5,
+        tool="search",
+        call_id="c-search",
+        ok=True,
+        output="notes/你好.txt:1",
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("files must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("files must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    assert main(["sessions", "files", log.session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "files", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    expected = session_files(load_events(log.path), session_id=log.session_id)
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    payload = json.loads(first)
+    assert payload["session_id"] == log.session_id
+    assert [item["path"] for item in payload["files"]] == ["a.py", "notes/你好.txt"]
+    assert payload["files"][0]["tools"] == [
+        {"tool": "read_file", "ok": 1, "fail": 0},
+        {"tool": "edit_file", "ok": 0, "fail": 1},
+    ]
+    assert payload["files"][1]["tools"] == [
+        {"tool": "write_file", "ok": 0, "fail": 1},
+        {"tool": "search", "ok": 1, "fail": 0},
+    ]
+    assert "你好" in first
+    assert "\\u" not in first
+    assert "run_shell" not in first
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "notes").exists()
+
+    assert main(["sessions", "files", log.session_id, "--workspace", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert text == f"file {log.path}\n" + format_files(expected)
+    assert "fail=1" in text
+    assert "你好" in text
+
+
 def test_sessions_help_lists_patch(capsys) -> None:
     with pytest.raises(SystemExit) as caught:
         main(["sessions", "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{list,show,stats,changes,patch,replay,html}" in help_text
+    assert "{list,show,stats,changes,patch,files,replay,html}" in help_text
     assert "unified diffs" in help_text
+    assert "ok/fail counts" in help_text
 
 
 def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:

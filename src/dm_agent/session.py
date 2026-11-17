@@ -292,6 +292,77 @@ def session_changes(events: list[dict[str, Any]], *, session_id: str = "") -> di
     }
 
 
+def session_files(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """Inventory paths recorded on tool calls, with per-tool ok/fail counts.
+
+    Only ``tool_call`` events are walked. A call contributes a path when
+    ``arguments`` is a dict and ``arguments.path`` is a non-empty string.
+    The logged string is kept as-is. It is not normalized, resolved, or
+    rewritten. Calls whose arguments are missing, not a dict, or whose
+    path is missing, not a string, or empty are omitted. A tool that
+    recorded no path, such as a typical ``run_shell``, is omitted the
+    same way. ``search``, ``list_dir``, ``lint_python``, ``run_pytest``,
+    ``read_file``, ``edit_file``, and ``write_file`` are included when
+    they recorded a non-empty path, and so is any other tool that did.
+    A call whose ``tool`` is not a string is omitted, because there is
+    no tool name to count.
+
+    A call is ok when ``_tool_result_ok`` maps its ``call_id`` to true:
+    the last ``tool_result`` with that id has ``ok`` true. Otherwise it
+    is a fail. That includes a failed result, a result whose ``ok`` is
+    not true, and an unpaired call. A missing or empty ``call_id``
+    cannot be paired, so that call is a fail when it otherwise has a
+    valid path. Calls that share a path and tool name increment that
+    tool's ``ok`` or ``fail`` count. A tool row is not emitted when both
+    counts would be zero.
+
+    Paths stay in first-seen log order. Tools under a path stay in
+    first-seen order too, not alphabetical. ``session_id`` is the first
+    id in the log, or the provided ``session_id`` when the log has none.
+    This reads the events only. It does not list or diff the workspace,
+    and it does not open any path from the log.
+    """
+    result_ok = _tool_result_ok(events)
+    files: list[dict[str, Any]] = []
+    by_path: dict[str, dict[str, Any]] = {}
+    by_tool: dict[str, dict[str, dict[str, Any]]] = {}
+    for event in events:
+        if event.get("kind") != "tool_call":
+            continue
+        tool = event.get("tool")
+        if not isinstance(tool, str):
+            continue
+        arguments = event.get("arguments")
+        if not isinstance(arguments, dict):
+            continue
+        path = arguments.get("path")
+        if not isinstance(path, str) or path == "":
+            continue
+        call_id = event.get("call_id")
+        succeeded = (
+            isinstance(call_id, str) and call_id != "" and result_ok.get(call_id) is True
+        )
+        file_entry = by_path.get(path)
+        if file_entry is None:
+            file_entry = {"path": path, "tools": []}
+            by_path[path] = file_entry
+            by_tool[path] = {}
+            files.append(file_entry)
+        row = by_tool[path].get(tool)
+        if row is None:
+            row = {"tool": tool, "ok": 0, "fail": 0}
+            by_tool[path][tool] = row
+            file_entry["tools"].append(row)
+        if succeeded:
+            row["ok"] += 1
+        else:
+            row["fail"] += 1
+    return {
+        "session_id": _first_session_id(events, session_id),
+        "files": files,
+    }
+
+
 def _recorded_lines(text: str) -> tuple[list[str], bool]:
     """Split ``text`` on ``\\n`` and report whether it ends with a newline.
 

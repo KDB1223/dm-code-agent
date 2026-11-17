@@ -12,7 +12,7 @@
 - **ReAct 循环。** 计划，调用工具，读取观察，重复，直到最终回答或达到步数上限。
 - **工作区工具。** 读、写、精确替换、列目录、搜索。Shell 会拒绝指向项目之外的路径。
 - **课程工具。** `lint_python` 报告语法错误、裸 `except`、残留的 `breakpoint()`。`run_pytest` 返回结构化的通过/失败计数。
-- **审计日志。** `.dm-agent/sessions/` 下的追加 JSONL，支持 `list`、`show`、`stats`、`changes`、`patch`，以及不重新执行工具的干跑 `replay`。
+- **审计日志。** `.dm-agent/sessions/` 下的追加 JSONL，支持 `list`、`show`、`stats`、`changes`、`patch`、`files`，以及不重新执行工具的干跑 `replay`。
 - **离线评测。** 三个小题配有黄金检查。不需要 API key，`python -m evals.run` 应输出 `score 3/3`。
 
 **Topics:** `coding-agent` `react` `auditability` `local-first` `llm` `education`
@@ -75,6 +75,7 @@ python -m dm_agent sessions show SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions stats SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions changes SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions patch SESSION_ID --workspace examples/demo_workspace
+python -m dm_agent sessions files SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
 ```
 
@@ -83,6 +84,8 @@ python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspac
 `changes` 只读同一份 JSONL，按日志顺序打印每一次成功的 `edit_file` 和 `write_file`：路径、step、call id，以及记下的 `old`/`new` 或 `write_file` 内容。同一路径的多次成功修改都会列出。输出重建的是日志参数，不是当前工作区的 diff。不需要 API key，也不会调用模型或重新执行工具。加上 `--json` 时输出同一份列表的 JSON。
 
 `patch` 只读同一份 JSONL，把 `changes` 会列出的每一次成功修改打成 unified diff，顺序相同。`edit_file` 用记下的 `old`/`new` 片段做成从第 1 行起算的 hunk，没有周围上下文。`write_file` 把记下的内容当作整文件新增（`--- /dev/null`），不是删除工作区里被覆盖前的旧字节。同一路径的多次修改各自成段，不合并。`replace_all=true` 只写在该文件头上方的注释里，不会把同一处替换展开成多次。补丁来自日志参数，不是当前工作区的 diff。不需要 API key，也不会调用模型或重新执行工具。加上 `--json` 时输出带每段 `diff` 的 JSON。
+
+`files` 只读同一份 JSONL，列出工具调用记下的路径，并给出每个工具的成功/失败次数。只要调用记录了非空 `path` 就会计入，包括读取、lint、搜索和失败的修改；失败的结果和没有配对结果的调用都算失败。它不是当前工作区的文件列表。不需要 API key，也不会调用模型或重新执行工具。加上 `--json` 时输出同一份清单的 JSON。
 
 若 `dm-agent` 已在 `PATH` 上，可以把 `python -m dm_agent` 换成 `dm-agent`。
 

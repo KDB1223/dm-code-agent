@@ -147,6 +147,49 @@ def format_patch(payload: dict[str, Any]) -> str:
     return head + "\n" + "\n".join(diffs)
 
 
+def format_files(payload: dict[str, Any]) -> str:
+    """Text for ``sessions files``. Field order is fixed.
+
+    Zero files are two lines and a trailing newline, with no extra blank
+    line. Otherwise a blank line, then one block per file in payload
+    order. Blocks are separated by one blank line. Each path is its own
+    line. Each tool row is indented two spaces as ``{tool} ok={ok}
+    fail={fail}``. Both counts are always printed. A non-list ``files``
+    value is empty. An entry that is not a dict is skipped.
+    """
+    session_id = str(payload.get("session_id") or "(unknown)")
+    raw_files = payload.get("files")
+    files = raw_files if isinstance(raw_files, list) else []
+    blocks: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path", "")
+        if not isinstance(path, str):
+            path = ""
+        raw_tools = item.get("tools")
+        tools = raw_tools if isinstance(raw_tools, list) else []
+        lines = [path]
+        for row in tools:
+            if not isinstance(row, dict):
+                continue
+            tool = row.get("tool", "")
+            if not isinstance(tool, str):
+                tool = ""
+            ok = row.get("ok", 0)
+            fail = row.get("fail", 0)
+            if isinstance(ok, bool) or not isinstance(ok, int):
+                ok = 0
+            if isinstance(fail, bool) or not isinstance(fail, int):
+                fail = 0
+            lines.append(f"  {tool} ok={ok} fail={fail}")
+        blocks.append("\n".join(lines))
+    head = f"session {session_id}\nfiles {len(blocks)}\n"
+    if not blocks:
+        return head
+    return head + "\n" + "\n\n".join(blocks) + "\n"
+
+
 def format_stats(stats: dict[str, Any]) -> str:
     """Compact text for ``sessions stats``. Field order is fixed."""
     tools = stats.get("tools") or {}

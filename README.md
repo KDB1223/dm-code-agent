@@ -12,7 +12,7 @@ Hosted chat hides the tool trace. dm-agent keeps the trace on disk, next to the 
 - **ReAct loop.** Plan, call a tool, read the observation, repeat until a final answer or the step limit.
 - **Workspace tools.** Read, write, edit, list, and search. The shell refuses commands that point outside the project.
 - **Course tools.** `lint_python` reports syntax errors, bare `except`, and leftover `breakpoint()` calls. `run_pytest` returns a structured pass/fail summary.
-- **Audit log.** Append-only JSONL under `.dm-agent/sessions/`, with `list`, `show`, `stats`, `changes`, `patch`, and a dry `replay` that does not re-run tools.
+- **Audit log.** Append-only JSONL under `.dm-agent/sessions/`, with `list`, `show`, `stats`, `changes`, `patch`, `files`, and a dry `replay` that does not re-run tools.
 - **Offline evals.** Three toy tasks with golden checks. `python -m evals.run` prints `score 3/3` without an API key.
 
 **Topics:** `coding-agent` `react` `auditability` `local-first` `llm` `education`
@@ -74,6 +74,7 @@ python -m dm_agent sessions list --workspace examples/demo_workspace
 python -m dm_agent sessions stats SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions changes SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions patch SESSION_ID --workspace examples/demo_workspace
+python -m dm_agent sessions files SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
 ```
 
@@ -85,7 +86,7 @@ The session file is:
 examples/demo_workspace/.dm-agent/sessions/<session-id>.jsonl
 ```
 
-`replay` reprints the transcript from that file. It does not call the model and does not edit the workspace again. `changes` lists every successful `edit_file` and `write_file` recorded in that file, in log order. It does not diff the workspace or re-run tools. `patch` prints those same mutations as unified diffs rebuilt from the logged arguments, not from a live workspace diff. A `write_file` is the recorded content as a full-file add, not a deletion of any previous workspace bytes.
+`replay` reprints the transcript from that file. It does not call the model and does not edit the workspace again. `changes` lists every successful `edit_file` and `write_file` recorded in that file, in log order. It does not diff the workspace or re-run tools. `patch` prints those same mutations as unified diffs rebuilt from the logged arguments, not from a live workspace diff. A `write_file` is the recorded content as a full-file add, not a deletion of any previous workspace bytes. `files` lists every path a tool call recorded, including reads, lints, searches, and failed edits, with per-tool ok/fail counts. It only reads the JSONL and is not a listing of the current workspace.
 
 ## Sample transcript
 
@@ -175,6 +176,7 @@ python -m dm_agent sessions show SESSION --workspace PATH
 python -m dm_agent sessions stats SESSION --workspace PATH
 python -m dm_agent sessions changes SESSION --workspace PATH
 python -m dm_agent sessions patch SESSION --workspace PATH
+python -m dm_agent sessions files SESSION --workspace PATH
 python -m dm_agent sessions replay SESSION --workspace PATH
 python -m dm_agent sessions html SESSION --workspace PATH
 ```
@@ -213,6 +215,8 @@ Each line is one JSON object. Lines are appended and `fsync`'d. A crash keeps ev
 `sessions changes` reads the same JSONL and lists every successful `edit_file` and `write_file` in log order. Each entry has the path, the step, the call id, and the recorded `old`/`new` text or `write_file` content. The same path is listed once per successful mutation. The text is rebuilt from those logged arguments, not from a diff of the workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the list as JSON.
 
 `sessions patch` reads the same JSONL and prints a unified diff for every mutation `sessions changes` would list, in the same order. An `edit_file` becomes a snippet hunk (`@@ -1,N +1,M @@`) built from the recorded `old` and `new` text, with no surrounding context. A `write_file` is a full-file add of the recorded content (`--- /dev/null`), not a deletion of any previous workspace bytes. Repeated edits to the same path stay separate diffs. `replace_all=true` is a comment above that file header and is not expanded into extra hunks. The patch is rebuilt from logged arguments, not from a live diff of the workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the patches as JSON, including each `diff` string.
+
+`sessions files` reads the same JSONL and lists every path a tool call recorded, with per-tool ok/fail counts. Any call that logged a non-empty `path` is included: reads, lints, searches, and failed edits. A failed result and an unpaired call count as fail. It is not a listing of the current workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the inventory as JSON.
 
 ## Safety
 
