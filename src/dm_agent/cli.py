@@ -14,6 +14,7 @@ from dm_agent.errors import AgentError, ConfigError, LLMError
 from dm_agent.llm import OpenAICompatibleLLM, public_base_url
 from dm_agent.present import (
     format_changes,
+    format_files,
     format_inspection,
     format_patch,
     format_stats,
@@ -25,6 +26,7 @@ from dm_agent.session import (
     load_events,
     resolve_session_file,
     session_changes,
+    session_files,
     session_patch,
     session_stats,
     summarize_session,
@@ -117,6 +119,15 @@ def build_parser() -> argparse.ArgumentParser:
     patch.add_argument("session_id", help="Session id or a unique prefix.")
     patch.add_argument("--json", action="store_true", help="Print the patches as JSON.")
     patch.set_defaults(handler=cmd_patch)
+
+    files = session_sub.add_parser(
+        "files",
+        parents=[common],
+        help="List workspace paths recorded in tool calls, with per-tool ok/fail counts.",
+    )
+    files.add_argument("session_id", help="Session id or a unique prefix.")
+    files.add_argument("--json", action="store_true", help="Print the inventory as JSON.")
+    files.set_defaults(handler=cmd_files)
 
     replay = session_sub.add_parser(
         "replay",
@@ -254,6 +265,18 @@ def cmd_patch(args: argparse.Namespace) -> int:
         return 0
     print(f"file {path}")
     sys.stdout.write(format_patch(payload))
+    return 0
+
+
+def cmd_files(args: argparse.Namespace) -> int:
+    """Print paths recorded in tool calls. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    payload = session_files(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_files(payload))
     return 0
 
 
