@@ -76,6 +76,7 @@ dm-agent sessions stats <id> --workspace examples/demo_workspace
 dm-agent sessions changes <id> --workspace examples/demo_workspace
 dm-agent sessions patch <id> --workspace examples/demo_workspace
 dm-agent sessions files <id> --workspace examples/demo_workspace
+dm-agent sessions failures <id> --workspace examples/demo_workspace
 dm-agent sessions replay <id> --workspace examples/demo_workspace
 ```
 
@@ -102,6 +103,8 @@ examples/demo_workspace/.dm-agent/sessions/<id>.jsonl
 `dm-agent sessions patch` 只读同一份 JSONL，把 `changes` 会列出的成功修改打成 unified diff。片段来自日志里记下的参数，不是对照当前工作区重算的 diff。`write_file` 显示为记下内容的整文件新增，而不是删掉写入前的旧字节。它不重新执行工具，也不需要 API key。
 
 `dm-agent sessions files` 只读同一份 JSONL，列出工具调用记下的路径，以及每个工具的成功和失败次数。读取、lint、搜索和失败的修改都会计入；没有配对结果的调用算失败。它不是当前工作区的目录列表，也不重新执行工具，不需要 API key。
+
+`dm-agent sessions failures` 只读同一份 JSONL，按日志顺序列出失败的工具调用和会话 `error` 事件。结果不是成功的调用、没有配对结果的调用、以及没有记下路径的调用（例如 `run_shell`）都会列出，并带上 step、call id 和记下的输出。它不是当前工作区的目录列表，也不重新执行工具，不需要 API key。
 
 ### 3. 观察工作区禁闭
 

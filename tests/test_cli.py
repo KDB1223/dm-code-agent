@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 
 from dm_agent.cli import main
-from dm_agent.present import format_changes, format_files, format_patch
+from dm_agent.present import format_changes, format_failures, format_files, format_patch
 from dm_agent.session import (
     SessionLog,
     load_events,
     session_changes,
+    session_failures,
     session_files,
     session_patch,
 )
@@ -426,14 +427,102 @@ def test_files_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, c
     assert "你好" in text
 
 
-def test_sessions_help_lists_patch(capsys) -> None:
+def test_failures_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log = _sample_log(tmp_path)
+    log.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        arguments={"path": "a.py", "old": "missing", "new": "nope"},
+    )
+    log.append(
+        kind="tool_result",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        ok=False,
+        output="old string was not found",
+    )
+    log.append(
+        kind="tool_call",
+        step=3,
+        tool="write_file",
+        call_id="c-open",
+        arguments={"path": "notes/你好.txt", "content": "你好"},
+    )
+    log.append(kind="error", step=4, content="connection reset")
+    log.append(
+        kind="tool_call",
+        step=5,
+        tool="run_shell",
+        call_id="c-shell",
+        arguments={"command": "pytest -q"},
+    )
+    log.append(
+        kind="tool_result",
+        step=5,
+        tool="run_shell",
+        call_id="c-shell",
+        ok=False,
+        output="failed",
+    )
+    log.append(kind="max_steps", step=6, content="stopped")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("failures must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("failures must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    assert main(["sessions", "failures", log.session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "failures", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    expected = session_failures(load_events(log.path), session_id=log.session_id)
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    payload = json.loads(first)
+    assert payload["session_id"] == log.session_id
+    assert [item["kind"] for item in payload["failures"]] == ["tool", "tool", "error", "tool"]
+    assert payload["failures"][0]["tool"] == "edit_file"
+    assert payload["failures"][0]["status"] == "failed"
+    assert payload["failures"][0]["output"] == "old string was not found"
+    assert payload["failures"][1]["path"] == "notes/你好.txt"
+    assert payload["failures"][1]["status"] == "unpaired"
+    assert payload["failures"][2]["content"] == "connection reset"
+    assert payload["failures"][3]["tool"] == "run_shell"
+    assert payload["failures"][3]["path"] is None
+    assert "c1" not in [item.get("call_id") for item in payload["failures"]]
+    assert "你好" in first
+    assert "\\u" not in first
+    assert "old string was not found" in first
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "notes").exists()
+
+    assert main(["sessions", "failures", log.session_id, "--workspace", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert text == f"file {log.path}\n" + format_failures(expected)
+    assert "status=failed" in text
+    assert "old string was not found" in text
+    assert "你好" in text
+    assert "run_shell" in text
+
+
+def test_sessions_help_lists_failures(capsys) -> None:
     with pytest.raises(SystemExit) as caught:
         main(["sessions", "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{list,show,stats,changes,patch,files,replay,html}" in help_text
+    assert "{list,show,stats,changes,patch,files,failures,replay,html}" in help_text
     assert "unified diffs" in help_text
     assert "ok/fail counts" in help_text
+    assert "failed tool calls and session error events" in help_text
 
 
 def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:

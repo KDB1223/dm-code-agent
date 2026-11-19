@@ -190,6 +190,78 @@ def format_files(payload: dict[str, Any]) -> str:
     return head + "\n" + "\n\n".join(blocks) + "\n"
 
 
+def _indented_body(text: str) -> str:
+    """Indent each line by two spaces.
+
+    A trailing newline ends the text. It does not become an extra blank
+    body line. Internal newlines, including a blank line, stay.
+    """
+    if text.endswith("\n"):
+        text = text[:-1]
+    return "\n".join(f"  {line}" for line in text.split("\n"))
+
+
+def _failure_step(step: Any) -> str:
+    if isinstance(step, int) and not isinstance(step, bool):
+        return str(step)
+    return "?"
+
+
+def format_failures(payload: dict[str, Any]) -> str:
+    """Text for ``sessions failures``. Field order is fixed.
+
+    Zero failures are two lines and a trailing newline, with no extra blank
+    line. Otherwise a blank line, then one block per failure. Blocks are
+    separated by one blank line, and a trailing newline follows the last
+    block. A non-list ``failures`` value is empty. An entry that is not a
+    dict is skipped. The count is the number of blocks printed.
+
+    A tool block starts with ``tool {tool} step={step} call_id={call_id}
+    status={status}``. A non-empty string ``path`` is appended on that
+    line. A missing step is ``step=?``. A non-empty string ``output`` is
+    indented two spaces per line. An error block starts with
+    ``error step={step}``. A non-empty string ``content`` is indented the
+    same way.
+    """
+    session_id = str(payload.get("session_id") or "(unknown)")
+    raw_failures = payload.get("failures")
+    failures = raw_failures if isinstance(raw_failures, list) else []
+    blocks: list[str] = []
+    for item in failures:
+        if not isinstance(item, dict):
+            continue
+        step = _failure_step(item.get("step"))
+        if item.get("kind") == "error":
+            lines = [f"error step={step}"]
+            content = item.get("content", "")
+            if isinstance(content, str) and content != "":
+                lines.append(_indented_body(content))
+            blocks.append("\n".join(lines))
+            continue
+        tool = item.get("tool", "")
+        if not isinstance(tool, str):
+            tool = ""
+        call_id = item.get("call_id", "")
+        if not isinstance(call_id, str):
+            call_id = ""
+        status = item.get("status", "")
+        if not isinstance(status, str):
+            status = ""
+        header = f"tool {tool} step={step} call_id={call_id} status={status}"
+        path = item.get("path")
+        if isinstance(path, str) and path != "":
+            header += f" path={path}"
+        lines = [header]
+        output = item.get("output", "")
+        if isinstance(output, str) and output != "":
+            lines.append(_indented_body(output))
+        blocks.append("\n".join(lines))
+    head = f"session {session_id}\nfailures {len(blocks)}\n"
+    if not blocks:
+        return head
+    return head + "\n" + "\n\n".join(blocks) + "\n"
+
+
 def format_stats(stats: dict[str, Any]) -> str:
     """Compact text for ``sessions stats``. Field order is fixed."""
     tools = stats.get("tools") or {}
