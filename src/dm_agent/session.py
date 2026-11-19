@@ -363,6 +363,100 @@ def session_files(events: list[dict[str, Any]], *, session_id: str = "") -> dict
     }
 
 
+def session_failures(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """List failed tool calls and session ``error`` events in log order.
+
+    A ``tool_call`` is a failure unless ``_tool_result_ok`` maps its
+    ``call_id`` to true: the last ``tool_result`` with that id has ``ok``
+    true. That includes a failed result, a result whose ``ok`` is not true
+    (including numeric 1), an unpaired call, and a missing or empty
+    ``call_id`` (it cannot be paired). A call is included even when it has
+    no non-empty string ``arguments.path``, which is how a typical
+    ``run_shell`` is recorded. The logged path is kept as-is when it is a
+    non-empty string. It is not normalized, resolved, or rewritten. A call
+    whose ``tool`` is not a string is omitted. Ghost ``tool_result`` events
+    with no matching ``tool_call`` are omitted. Successful calls are omitted.
+
+    ``status`` is ``failed`` when a last ``tool_result`` was paired: the
+    call id is a non-empty string, it is present in the ``_tool_result_ok``
+    map, and that value is not true. ``status`` is ``unpaired`` when there
+    was no pairable result. ``output`` is that last paired result's
+    ``output`` when the field is a string, and ``""`` otherwise.
+
+    An ``error`` event (``kind == "error"``) is included in the same list,
+    at its place in the log. ``content`` is the event content when that
+    field is a string, and ``""`` otherwise. ``max_steps``, ``final``, and
+    thoughts are omitted. ``stats`` already reports whether the session
+    ended with ``final``.
+
+    ``session_id`` is the first non-empty string id in the log, or the
+    provided ``session_id`` when the log has none. This reads the events
+    only. It does not execute tools, call a model, or read or diff the
+    workspace.
+    """
+    result_ok = _tool_result_ok(events)
+    last_output: dict[str, str] = {}
+    for event in events:
+        if event.get("kind") != "tool_result":
+            continue
+        call_id = event.get("call_id")
+        if not isinstance(call_id, str) or call_id == "":
+            continue
+        output = event.get("output")
+        last_output[call_id] = output if isinstance(output, str) else ""
+
+    failures: list[dict[str, Any]] = []
+    for event in events:
+        kind = event.get("kind")
+        if kind == "error":
+            content = event.get("content")
+            failures.append(
+                {
+                    "kind": "error",
+                    "step": _event_step(event),
+                    "content": content if isinstance(content, str) else "",
+                }
+            )
+            continue
+        if kind != "tool_call":
+            continue
+        tool = event.get("tool")
+        if not isinstance(tool, str):
+            continue
+        raw_call_id = event.get("call_id")
+        call_id = raw_call_id if isinstance(raw_call_id, str) else ""
+        paired = call_id != "" and call_id in result_ok
+        if paired and result_ok[call_id] is True:
+            continue
+        arguments = event.get("arguments")
+        path = None
+        if isinstance(arguments, dict):
+            raw_path = arguments.get("path")
+            if isinstance(raw_path, str) and raw_path != "":
+                path = raw_path
+        if paired:
+            status = "failed"
+            output = last_output.get(call_id, "")
+        else:
+            status = "unpaired"
+            output = ""
+        failures.append(
+            {
+                "kind": "tool",
+                "tool": tool,
+                "step": _event_step(event),
+                "call_id": call_id,
+                "path": path,
+                "status": status,
+                "output": output,
+            }
+        )
+    return {
+        "session_id": _first_session_id(events, session_id),
+        "failures": failures,
+    }
+
+
 def _recorded_lines(text: str) -> tuple[list[str], bool]:
     """Split ``text`` on ``\\n`` and report whether it ends with a newline.
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dm_agent.present import (
     format_changes,
+    format_failures,
     format_files,
     format_inspection,
     format_patch,
@@ -17,6 +18,7 @@ from dm_agent.session import (
     load_events,
     resolve_session_file,
     session_changes,
+    session_failures,
     session_files,
     session_patch,
     session_stats,
@@ -1091,6 +1093,440 @@ def test_session_files_empty_events_and_format() -> None:
         "\n"
         "math_utils.py\n"
         "  read_file ok=1 fail=0\n"
+    )
+
+
+def test_session_failures_lists_calls_and_errors_in_log_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = [
+        {"session_id": "sess-1", "step": 0, "kind": "session_start", "task": "audit"},
+        _call(1, "read_file", "c-ok", {"path": "a.py"}),
+        _ok(1, "c-ok"),
+        {"step": 1, "kind": "thought", "content": "edit next"},
+        _call(2, "edit_file", "c-fail", {"path": "a.py", "old": "missing", "new": "nope"}),
+        {
+            "step": 2,
+            "kind": "tool_result",
+            "tool": "edit_file",
+            "call_id": "c-fail",
+            "ok": False,
+            "output": "old string was not found",
+        },
+        {"step": 2, "kind": "error", "content": "connection reset"},
+        _call(3, "write_file", "c-open", {"path": "notes/你好.txt", "content": "你好"}),
+        _call(3, "run_shell", "c-shell", {"command": "pytest -q"}),
+        {
+            "step": 3,
+            "kind": "tool_result",
+            "call_id": "c-shell",
+            "ok": False,
+            "output": "exit 1\nfailed",
+        },
+        _call(4, "edit_file", "c-flip", {"path": "a.py", "old": "a", "new": "b"}),
+        _ok(4, "c-flip", ok=False),
+        _ok(4, "c-flip"),
+        _call(4, "lint_python", "c-late", {"path": "./a.py"}),
+        {"step": 4, "kind": "tool_result", "call_id": "c-late", "ok": True, "output": "first"},
+        {
+            "step": 4,
+            "kind": "tool_result",
+            "call_id": "c-late",
+            "ok": False,
+            "output": "second failed",
+        },
+        _call(5, "run_pytest", "c-num", {"path": "a.py/../a.py"}),
+        {"step": 5, "kind": "tool_result", "call_id": "c-num", "ok": 1, "output": "not a bool"},
+        _call(5, "search", "c-out", {"path": " "}),
+        {"step": 5, "kind": "tool_result", "call_id": "c-out", "ok": False, "output": ["nope"]},
+        {"step": 6, "kind": "tool_call", "tool": "list_dir", "arguments": {"path": "notes"}},
+        _call(6, "read_file", "", {"path": "e.py"}),
+        {"step": 6, "kind": "tool_result", "call_id": "", "ok": True, "output": "ignored"},
+        {
+            "step": 6,
+            "kind": "tool_call",
+            "tool": "search",
+            "call_id": 7,
+            "arguments": {"path": "g.py"},
+        },
+        {
+            "step": 7,
+            "kind": "tool_call",
+            "tool": "read_file",
+            "call_id": "c-list",
+            "arguments": ["math_utils.py"],
+        },
+        {"step": 7, "kind": "tool_call", "tool": "edit_file", "call_id": "c-no-args"},
+        {
+            "step": 7,
+            "kind": "tool_call",
+            "tool": 3,
+            "call_id": "c-badtool",
+            "arguments": {"path": "nope.py"},
+        },
+        {
+            "step": True,
+            "kind": "tool_call",
+            "tool": "read_file",
+            "call_id": "c-bool",
+            "arguments": {"path": "f.py"},
+        },
+        _call(8, "write_file", "c-empty", {"path": "", "content": "x"}),
+        _call(8, "read_file", "c-numpath", {"path": 3}),
+        _call(8, "run_shell", "c-sh-ok", {"command": "pwd"}),
+        _ok(8, "c-sh-ok"),
+        _call(8, "run_shell", "c-sh-path", {"path": "script.sh", "command": "python script.sh"}),
+        _ok(8, "c-sh-path", ok=False),
+        _call(9, "edit_file", "c-between", {"path": "between.py", "old": "a", "new": "b"}),
+        {"step": 9, "kind": "error", "content": "between"},
+        {
+            "step": 9,
+            "kind": "tool_result",
+            "call_id": "c-between",
+            "ok": False,
+            "output": "later output",
+        },
+        {"kind": "error", "step": False, "content": None},
+        {"kind": "error", "step": 0, "content": "zero"},
+        {"kind": "final", "step": 10, "content": "done"},
+        {"kind": "max_steps", "step": 11, "content": "stopped"},
+        {
+            "kind": "tool_result",
+            "tool": "write_file",
+            "call_id": "c-ghost",
+            "ok": False,
+            "output": "ghost",
+            "arguments": {"path": "ghost.py"},
+        },
+        {"kind": "error", "content": "after"},
+    ]
+    payload = session_failures(events)
+    assert list(payload) == ["session_id", "failures"]
+    assert payload == {
+        "session_id": "sess-1",
+        "failures": [
+            {
+                "kind": "tool",
+                "tool": "edit_file",
+                "step": 2,
+                "call_id": "c-fail",
+                "path": "a.py",
+                "status": "failed",
+                "output": "old string was not found",
+            },
+            {"kind": "error", "step": 2, "content": "connection reset"},
+            {
+                "kind": "tool",
+                "tool": "write_file",
+                "step": 3,
+                "call_id": "c-open",
+                "path": "notes/你好.txt",
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "run_shell",
+                "step": 3,
+                "call_id": "c-shell",
+                "path": None,
+                "status": "failed",
+                "output": "exit 1\nfailed",
+            },
+            {
+                "kind": "tool",
+                "tool": "lint_python",
+                "step": 4,
+                "call_id": "c-late",
+                "path": "./a.py",
+                "status": "failed",
+                "output": "second failed",
+            },
+            {
+                "kind": "tool",
+                "tool": "run_pytest",
+                "step": 5,
+                "call_id": "c-num",
+                "path": "a.py/../a.py",
+                "status": "failed",
+                "output": "not a bool",
+            },
+            {
+                "kind": "tool",
+                "tool": "search",
+                "step": 5,
+                "call_id": "c-out",
+                "path": " ",
+                "status": "failed",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "list_dir",
+                "step": 6,
+                "call_id": "",
+                "path": "notes",
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "read_file",
+                "step": 6,
+                "call_id": "",
+                "path": "e.py",
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "search",
+                "step": 6,
+                "call_id": "",
+                "path": "g.py",
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "read_file",
+                "step": 7,
+                "call_id": "c-list",
+                "path": None,
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "edit_file",
+                "step": 7,
+                "call_id": "c-no-args",
+                "path": None,
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "read_file",
+                "step": None,
+                "call_id": "c-bool",
+                "path": "f.py",
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "write_file",
+                "step": 8,
+                "call_id": "c-empty",
+                "path": None,
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "read_file",
+                "step": 8,
+                "call_id": "c-numpath",
+                "path": None,
+                "status": "unpaired",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "run_shell",
+                "step": 8,
+                "call_id": "c-sh-path",
+                "path": "script.sh",
+                "status": "failed",
+                "output": "",
+            },
+            {
+                "kind": "tool",
+                "tool": "edit_file",
+                "step": 9,
+                "call_id": "c-between",
+                "path": "between.py",
+                "status": "failed",
+                "output": "later output",
+            },
+            {"kind": "error", "step": 9, "content": "between"},
+            {"kind": "error", "step": None, "content": ""},
+            {"kind": "error", "step": 0, "content": "zero"},
+            {"kind": "error", "step": None, "content": "after"},
+        ],
+    }
+    for item in payload["failures"]:
+        if item["kind"] == "tool":
+            assert list(item) == ["kind", "tool", "step", "call_id", "path", "status", "output"]
+        else:
+            assert list(item) == ["kind", "step", "content"]
+    call_ids = [item["call_id"] for item in payload["failures"] if item["kind"] == "tool"]
+    assert "c-ok" not in call_ids
+    assert "c-flip" not in call_ids
+    assert "c-sh-ok" not in call_ids
+    assert "c-ghost" not in call_ids
+    assert "c-badtool" not in call_ids
+    assert [item["tool"] for item in payload["failures"] if item["kind"] == "tool"].count(
+        "run_shell"
+    ) == 2
+    assert "ghost.py" not in [item.get("path") for item in payload["failures"]]
+    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "notes").exists()
+    assert not (tmp_path / "ghost.py").exists()
+    assert not (tmp_path / "script.sh").exists()
+    assert not (tmp_path / "between.py").exists()
+
+
+def test_session_failures_empty_events_and_format() -> None:
+    assert session_failures([]) == {"session_id": "", "failures": []}
+    assert format_failures(session_failures([])) == "session (unknown)\nfailures 0\n"
+    assert format_failures({"session_id": "s", "failures": []}) == "session s\nfailures 0\n"
+    assert format_failures({"session_id": "s", "failures": None}) == "session s\nfailures 0\n"
+    assert format_failures({}) == "session (unknown)\nfailures 0\n"
+    fallback = session_failures(
+        [{"kind": "final", "step": 1, "content": "done"}],
+        session_id="from-stem",
+    )
+    assert fallback == {"session_id": "from-stem", "failures": []}
+    assert format_failures(fallback) == "session from-stem\nfailures 0\n"
+    logged = session_failures(
+        [
+            {"session_id": "", "kind": "error", "step": 1, "content": "x"},
+            {"session_id": "later", "kind": "final", "step": 2, "content": "done"},
+        ],
+        session_id="from-stem",
+    )
+    assert logged == {
+        "session_id": "later",
+        "failures": [{"kind": "error", "step": 1, "content": "x"}],
+    }
+    example = [
+        {"session_id": "sess-1", "step": 0, "kind": "session_start"},
+        _call(1, "read_file", "c-ok", {"path": "a.py"}),
+        _ok(1, "c-ok"),
+        _call(2, "edit_file", "c-fail", {"path": "a.py", "old": "x", "new": "y"}),
+        {
+            "step": 2,
+            "kind": "tool_result",
+            "call_id": "c-fail",
+            "ok": False,
+            "output": "old string was not found",
+        },
+        _call(3, "write_file", "c-open", {"path": "notes/你好.txt", "content": "x"}),
+        {"step": 4, "kind": "error", "content": "connection reset"},
+        {"step": 5, "kind": "max_steps", "content": "stopped"},
+        {"step": 5, "kind": "thought", "content": "nope"},
+        {"step": 5, "kind": "final", "content": "done"},
+    ]
+    payload = session_failures(example)
+    assert list(payload) == ["session_id", "failures"]
+    assert payload == {
+        "session_id": "sess-1",
+        "failures": [
+            {
+                "kind": "tool",
+                "tool": "edit_file",
+                "step": 2,
+                "call_id": "c-fail",
+                "path": "a.py",
+                "status": "failed",
+                "output": "old string was not found",
+            },
+            {
+                "kind": "tool",
+                "tool": "write_file",
+                "step": 3,
+                "call_id": "c-open",
+                "path": "notes/你好.txt",
+                "status": "unpaired",
+                "output": "",
+            },
+            {"kind": "error", "step": 4, "content": "connection reset"},
+        ],
+    }
+    assert format_failures(payload) == (
+        "session sess-1\n"
+        "failures 3\n"
+        "\n"
+        "tool edit_file step=2 call_id=c-fail status=failed path=a.py\n"
+        "  old string was not found\n"
+        "\n"
+        "tool write_file step=3 call_id=c-open status=unpaired path=notes/你好.txt\n"
+        "\n"
+        "error step=4\n"
+        "  connection reset\n"
+    )
+    multiline = format_failures(
+        {
+            "session_id": "s",
+            "failures": [
+                {
+                    "kind": "tool",
+                    "tool": "run_shell",
+                    "step": 1,
+                    "call_id": "c",
+                    "path": None,
+                    "status": "failed",
+                    "output": "line one\n\nline two\n",
+                },
+                {"kind": "error", "step": None, "content": "next\n"},
+            ],
+        }
+    )
+    assert multiline == (
+        "session s\n"
+        "failures 2\n"
+        "\n"
+        "tool run_shell step=1 call_id=c status=failed\n"
+        "  line one\n"
+        "  \n"
+        "  line two\n"
+        "\n"
+        "error step=?\n"
+        "  next\n"
+    )
+    assert "line two\n\n\nerror" not in multiline
+    skipped = format_failures(
+        {
+            "session_id": "s",
+            "failures": [
+                None,
+                "edit_file",
+                {
+                    "kind": "tool",
+                    "tool": "edit_file",
+                    "step": None,
+                    "call_id": "c",
+                    "path": None,
+                    "status": "unpaired",
+                    "output": "",
+                },
+                {"kind": "error", "step": 2, "content": ""},
+                {
+                    "kind": "tool",
+                    "tool": None,
+                    "step": True,
+                    "call_id": 4,
+                    "path": "",
+                    "status": None,
+                    "output": "kept",
+                },
+            ],
+        }
+    )
+    assert skipped == (
+        "session s\n"
+        "failures 3\n"
+        "\n"
+        "tool edit_file step=? call_id=c status=unpaired\n"
+        "\n"
+        "error step=2\n"
+        "\n"
+        "tool  step=? call_id= status=\n"
+        "  kept\n"
     )
 
 
