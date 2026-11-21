@@ -77,6 +77,7 @@ dm-agent sessions changes <id> --workspace examples/demo_workspace
 dm-agent sessions patch <id> --workspace examples/demo_workspace
 dm-agent sessions files <id> --workspace examples/demo_workspace
 dm-agent sessions failures <id> --workspace examples/demo_workspace
+dm-agent sessions compare <id-a> <id-b> --workspace examples/demo_workspace
 dm-agent sessions replay <id> --workspace examples/demo_workspace
 ```
 
@@ -105,6 +106,8 @@ examples/demo_workspace/.dm-agent/sessions/<id>.jsonl
 `dm-agent sessions files` 只读同一份 JSONL，列出工具调用记下的路径，以及每个工具的成功和失败次数。读取、lint、搜索和失败的修改都会计入；没有配对结果的调用算失败。它不是当前工作区的目录列表，也不重新执行工具，不需要 API key。
 
 `dm-agent sessions failures` 只读同一份 JSONL，按日志顺序列出失败的工具调用和会话 `error` 事件。结果不是成功的调用、没有配对结果的调用、以及没有记下路径的调用（例如 `run_shell`）都会列出，并带上 step、call id 和记下的输出。它不是当前工作区的目录列表，也不重新执行工具，不需要 API key。
+
+`dm-agent sessions compare` 只读两份已有 JSONL，比较基线会话和候选会话。差值是候选减去基线：回合数、失败条数（与 `failures` 列出的条数相同）、各工具的调用次数，以及成功 `edit_file` / `write_file` 记下的路径。路径按日志原文比较。它不是当前工作区的 diff，也不是模型质量分。不需要 API key，也不会重新执行工具。两边不同时命令仍然成功退出。
 
 ### 3. 观察工作区禁闭
 

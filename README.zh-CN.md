@@ -12,7 +12,7 @@
 - **ReAct 循环。** 计划，调用工具，读取观察，重复，直到最终回答或达到步数上限。
 - **工作区工具。** 读、写、精确替换、列目录、搜索。Shell 会拒绝指向项目之外的路径。
 - **课程工具。** `lint_python` 报告语法错误、裸 `except`、残留的 `breakpoint()`。`run_pytest` 返回结构化的通过/失败计数。
-- **审计日志。** `.dm-agent/sessions/` 下的追加 JSONL，支持 `list`、`show`、`stats`、`changes`、`patch`、`files`、`failures`，以及不重新执行工具的干跑 `replay`。
+- **审计日志。** `.dm-agent/sessions/` 下的追加 JSONL，支持 `list`、`show`、`stats`、`changes`、`patch`、`files`、`failures`、`compare`，以及不重新执行工具的干跑 `replay`。
 - **离线评测。** 三个小题配有黄金检查。不需要 API key，`python -m evals.run` 应输出 `score 3/3`。
 
 **Topics:** `coding-agent` `react` `auditability` `local-first` `llm` `education`
@@ -77,6 +77,7 @@ python -m dm_agent sessions changes SESSION_ID --workspace examples/demo_workspa
 python -m dm_agent sessions patch SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions files SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions failures SESSION_ID --workspace examples/demo_workspace
+python -m dm_agent sessions compare SESSION_A SESSION_B --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
 ```
 
@@ -89,6 +90,8 @@ python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspac
 `files` 只读同一份 JSONL，列出工具调用记下的路径，并给出每个工具的成功/失败次数。只要调用记录了非空 `path` 就会计入，包括读取、lint、搜索和失败的修改；失败的结果和没有配对结果的调用都算失败。它不是当前工作区的文件列表。不需要 API key，也不会调用模型或重新执行工具。加上 `--json` 时输出同一份清单的 JSON。
 
 `failures` 只读同一份 JSONL，按日志顺序列出每一次失败的工具调用，以及会话里的 `error` 事件。最后一次结果不是成功、没有配对结果、或者没有 `call_id` 的调用都会计入，包括没有记下路径的工具（例如 `run_shell`）。每条包含 step、call id、状态（`failed` 或 `unpaired`）、记下的路径（如果有）和记下的输出。它不是当前工作区的文件列表。不需要 API key，也不会调用模型或重新执行工具。加上 `--json` 时输出同一份清单的 JSON。
+
+`compare` 只读同一目录里的两份 JSONL。第一个 id 是基线，第二个是候选，差值是候选减去基线：回合数、`failures` 会列出的失败条数、各工具调用次数，以及成功的 `edit_file` / `write_file` 记下的路径（只在基线、只在候选、或两边都有）。路径按日志原文比较，不做规范化。状态与 `list` 对这份可读日志给出的词相同（`open`、`final`、`max_steps` 或 `error`）。`ended_cleanly` 表示最后一个终止事件是不是 `final`，因此可能和状态不同。这不是当前工作区的 diff，也不是模型质量分。不需要 API key，不会调用模型或重新执行工具。两边不同，或其中一边没有干净结束，仍然退出 0。加上 `--json` 时只输出这份比较的 JSON。
 
 若 `dm-agent` 已在 `PATH` 上，可以把 `python -m dm_agent` 换成 `dm-agent`。
 

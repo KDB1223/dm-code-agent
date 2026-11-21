@@ -6,14 +6,22 @@ from pathlib import Path
 import pytest
 
 from dm_agent.cli import main
-from dm_agent.present import format_changes, format_failures, format_files, format_patch
+from dm_agent.present import (
+    format_changes,
+    format_compare,
+    format_failures,
+    format_files,
+    format_patch,
+)
 from dm_agent.session import (
     SessionLog,
     load_events,
     session_changes,
+    session_compare,
     session_failures,
     session_files,
     session_patch,
+    summarize_session,
 )
 
 
@@ -519,10 +527,11 @@ def test_sessions_help_lists_failures(capsys) -> None:
         main(["sessions", "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{list,show,stats,changes,patch,files,failures,replay,html}" in help_text
+    assert "{list,show,stats,changes,patch,files,failures,compare,replay,html}" in help_text
     assert "unified diffs" in help_text
     assert "ok/fail counts" in help_text
     assert "failed tool calls and session error events" in help_text
+    assert "Compare two recorded session logs" in help_text
 
 
 def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -536,6 +545,304 @@ def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> Non
     assert main(["sessions", "replay", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload[-1]["kind"] == "final"
+
+
+def test_compare_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log_dir = tmp_path / "custom-logs"
+    baseline = SessionLog.create(log_dir)
+    baseline.append(
+        kind="session_start",
+        step=0,
+        task="baseline",
+        model="scripted",
+        workspace=str(tmp_path),
+        log_version=1,
+    )
+    baseline.append(
+        kind="tool_call",
+        step=1,
+        tool="read_file",
+        call_id="c1",
+        arguments={"path": "a.py"},
+    )
+    baseline.append(
+        kind="tool_result",
+        step=1,
+        tool="read_file",
+        call_id="c1",
+        ok=True,
+        output="x",
+    )
+    baseline.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c2",
+        arguments={"path": "a.py", "old": "x", "new": "y"},
+    )
+    baseline.append(
+        kind="tool_result",
+        step=2,
+        tool="edit_file",
+        call_id="c2",
+        ok=True,
+        output="Updated a.py",
+    )
+    baseline.append(kind="final", step=3, content="done")
+
+    candidate = SessionLog.create(log_dir)
+    candidate.append(
+        kind="session_start",
+        step=0,
+        task="candidate",
+        model="scripted",
+        workspace=str(tmp_path),
+        log_version=1,
+    )
+    candidate.append(
+        kind="tool_call",
+        step=1,
+        tool="read_file",
+        call_id="c1",
+        arguments={"path": "a.py"},
+    )
+    candidate.append(
+        kind="tool_result",
+        step=1,
+        tool="read_file",
+        call_id="c1",
+        ok=True,
+        output="x",
+    )
+    candidate.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        arguments={"path": "a.py", "old": "nope", "new": "y"},
+    )
+    candidate.append(
+        kind="tool_result",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        ok=False,
+        output="old string was not found",
+    )
+    candidate.append(
+        kind="tool_call",
+        step=3,
+        tool="write_file",
+        call_id="c-write",
+        arguments={"path": "notes/你好.txt", "content": "你好"},
+    )
+    candidate.append(
+        kind="tool_result",
+        step=3,
+        tool="write_file",
+        call_id="c-write",
+        ok=True,
+        output="wrote",
+    )
+    candidate.append(kind="error", step=4, content="connection reset")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("compare must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("compare must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    shared = 0
+    for left, right in zip(baseline.session_id, candidate.session_id):
+        if left != right:
+            break
+        shared += 1
+    prefix = baseline.session_id[: shared + 1]
+    assert baseline.session_id.startswith(prefix)
+    assert not candidate.session_id.startswith(prefix)
+    argv = [
+        "sessions",
+        "compare",
+        prefix,
+        candidate.session_id,
+        "--workspace",
+        str(tmp_path),
+        "--log-dir",
+        str(log_dir),
+        "--json",
+    ]
+    assert main(argv) == 0
+    first = capsys.readouterr().out
+    assert main(
+        [
+            "sessions",
+            "compare",
+            baseline.session_id + ".jsonl",
+            candidate.session_id,
+            "--workspace",
+            str(tmp_path),
+            "--log-dir",
+            str(log_dir),
+            "--json",
+        ]
+    ) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    summary_a = summarize_session(baseline.path)
+    summary_b = summarize_session(candidate.path)
+    expected = session_compare(
+        load_events(baseline.path),
+        load_events(candidate.path),
+        session_id_a=baseline.path.stem,
+        session_id_b=candidate.path.stem,
+        status_a=summary_a["status"],
+        status_b=summary_b["status"],
+    )
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    assert not first.startswith("file_a")
+    assert "file_b" not in first
+    payload = json.loads(first)
+    assert payload["session_a"]["session_id"] == summary_a["session_id"]
+    assert payload["session_b"]["session_id"] == summary_b["session_id"]
+    assert payload["session_a"]["status"] == "final"
+    assert payload["session_b"]["status"] == "error"
+    assert payload["session_a"]["ended_cleanly"] is True
+    assert payload["session_b"]["ended_cleanly"] is False
+    assert payload["turns"]["delta"] == 1
+    assert payload["failures"]["delta"] == payload["failures"]["b"] - payload["failures"]["a"]
+    assert payload["failures"]["a"] == 0
+    assert payload["failures"]["b"] == 2
+    assert payload["files"] == {
+        "only_a": ["a.py"],
+        "only_b": ["notes/你好.txt"],
+        "both": [],
+    }
+    assert "你好" in first
+    assert "\\u" not in first
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "notes").exists()
+
+    assert main(
+        [
+            "sessions",
+            "compare",
+            baseline.session_id,
+            candidate.session_id,
+            "--workspace",
+            str(tmp_path),
+            "--log-dir",
+            str(log_dir),
+        ]
+    ) == 0
+    text = capsys.readouterr().out
+    assert text == f"file_a {baseline.path}\nfile_b {candidate.path}\n" + format_compare(expected)
+    assert "status         final -> error" in text
+    assert "notes/你好.txt" in text
+
+    assert main(
+        [
+            "sessions",
+            "compare",
+            baseline.session_id,
+            baseline.session_id,
+            "--workspace",
+            str(tmp_path),
+            "--log-dir",
+            str(log_dir),
+            "--json",
+        ]
+    ) == 0
+    same = json.loads(capsys.readouterr().out)
+    assert same["turns"]["delta"] == 0
+    assert same["failures"]["delta"] == 0
+    assert all(row["delta"] == 0 for row in same["tools"])
+    assert same["files"]["only_a"] == []
+    assert same["files"]["only_b"] == []
+    assert same["files"]["both"] == ["a.py"]
+    assert same["session_a"]["session_id"] == same["session_b"]["session_id"] == baseline.session_id
+
+
+def test_compare_rejects_unknown_ambiguous_and_bad_usage(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    assert main(["sessions", "compare", "missing-a", "missing-b", "--workspace", str(tmp_path)]) == 1
+    assert "not found" in capsys.readouterr().err
+
+    log_dir = tmp_path / ".dm-agent" / "sessions"
+    log_dir.mkdir(parents=True)
+    for suffix in ("aaa111", "aaa222"):
+        path = log_dir / f"20260101T000000Z-{suffix}.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-01-01T00:00:00.000Z",
+                    "session_id": path.stem,
+                    "seq": 1,
+                    "step": 0,
+                    "kind": "session_start",
+                    "task": suffix,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    other = log_dir / "20260102T000000Z-bbb333.jsonl"
+    other.write_text(
+        json.dumps(
+            {
+                "ts": "2026-01-02T00:00:00.000Z",
+                "session_id": other.stem,
+                "seq": 1,
+                "step": 1,
+                "kind": "final",
+                "content": "done",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "sessions",
+                "compare",
+                other.stem,
+                "20260101T000000Z-aaa",
+                "--workspace",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    assert "ambiguous" in capsys.readouterr().err
+    assert main(["sessions", "compare", "bad/id", other.stem, "--workspace", str(tmp_path)]) == 1
+    assert "invalid" in capsys.readouterr().err
+    assert main(["sessions", "compare", other.stem, ".hidden", "--workspace", str(tmp_path)]) == 1
+    assert "invalid" in capsys.readouterr().err
+    missing_cfg = tmp_path / "missing.toml"
+    assert (
+        main(
+            [
+                "sessions",
+                "compare",
+                other.stem,
+                other.stem,
+                "--config",
+                str(missing_cfg),
+                "--workspace",
+                str(tmp_path),
+            ]
+        )
+        == 2
+    )
+    assert "not found" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as caught:
+        main(["sessions", "compare", "only-one"])
+    assert caught.value.code == 2
 
 
 def test_ambiguous_session_id(monkeypatch, tmp_path: Path, capsys) -> None:

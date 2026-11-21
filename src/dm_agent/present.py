@@ -262,6 +262,149 @@ def format_failures(payload: dict[str, Any]) -> str:
     return head + "\n" + "\n\n".join(blocks) + "\n"
 
 
+def _compare_int(value: Any) -> int:
+    """Integer count from a comparison payload. Bools and other types are 0."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
+def _compare_delta(left: int, right: int) -> str:
+    """Signed suffix for a non-zero delta. Zero is omitted, not ``(0)``."""
+    delta = right - left
+    if delta == 0:
+        return ""
+    return f"  ({delta:+d})"
+
+
+def _compare_side(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    raw = payload.get(key)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _compare_id(side: dict[str, Any]) -> str:
+    session_id = side.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    if session_id and not isinstance(session_id, str):
+        return str(session_id)
+    return "(unknown)"
+
+
+def _compare_status(side: dict[str, Any]) -> str:
+    status = side.get("status")
+    if isinstance(status, str) and status:
+        return status
+    return "open"
+
+
+def _format_compare_tools(payload: dict[str, Any]) -> str:
+    raw = payload.get("tools")
+    rows = raw if isinstance(raw, list) else []
+    rendered: list[tuple[str, int, int]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("tool", "")
+        if not isinstance(name, str):
+            name = ""
+        rendered.append((name, _compare_int(row.get("a")), _compare_int(row.get("b"))))
+    if not rendered:
+        return "tools (none)"
+    width = max(len(name) for name, _count_a, _count_b in rendered)
+    lines = ["tools"]
+    for name, count_a, count_b in rendered:
+        lines.append(
+            f"  {name:<{width}}  {count_a} -> {count_b}{_compare_delta(count_a, count_b)}"
+        )
+    return "\n".join(lines)
+
+
+def _format_compare_paths(paths: list[str]) -> list[str]:
+    if not paths:
+        return ["    (none)"]
+    return [f"    {path}" for path in paths]
+
+
+def _format_compare_files(payload: dict[str, Any]) -> str:
+    raw = payload.get("files")
+    data = raw if isinstance(raw, dict) else {}
+    buckets: dict[str, list[str]] = {}
+    for key in ("only_a", "only_b", "both"):
+        items = data.get(key)
+        paths: list[str] = []
+        if isinstance(items, list):
+            for path in items:
+                if isinstance(path, str):
+                    paths.append(path)
+        buckets[key] = paths
+    if not any(buckets.values()):
+        return "files (none)"
+    lines = ["files"]
+    for key in ("only_a", "only_b", "both"):
+        lines.append(f"  {key}")
+        lines.extend(_format_compare_paths(buckets[key]))
+    return "\n".join(lines)
+
+
+def format_compare(payload: dict[str, Any]) -> str:
+    """Text for ``sessions compare``. Field order is fixed.
+
+    The CLI prints ``file_a`` and ``file_b`` before this text. This
+    function does not include those paths.
+
+    Labels in the header are padded to ``ended_cleanly``, then two
+    spaces. Counts are always printed, including zero. An integer delta
+    of 0 has no suffix. Any other delta has a signed suffix with a
+    leading two spaces, such as ``  (+1)`` or ``  (-2)``.
+    ``ended_cleanly`` is ``yes`` or ``no`` and has no delta.
+    A missing side id is ``(unknown)``. A missing status is ``open``.
+
+    Tool rows follow the payload order, names padded to the longest
+    name in the list, then two spaces. An empty tool list is
+    ``tools (none)``. File buckets are ``only_a``, ``only_b``, then
+    ``both``. Paths are printed as given, four spaces in. An empty
+    bucket under a non-empty files section is ``    (none)``. When
+    every bucket is empty the section is ``files (none)``. A blank
+    line separates the header, the tools section, and the files
+    section. The result ends with one trailing newline.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    side_a = _compare_side(payload, "session_a")
+    side_b = _compare_side(payload, "session_b")
+    turns = payload.get("turns")
+    turn_row = turns if isinstance(turns, dict) else {}
+    failures = payload.get("failures")
+    failure_row = failures if isinstance(failures, dict) else {}
+    ended = payload.get("ended_cleanly")
+    ended_row = ended if isinstance(ended, dict) else {}
+    turns_a = _compare_int(turn_row.get("a", side_a.get("turns")))
+    turns_b = _compare_int(turn_row.get("b", side_b.get("turns")))
+    failures_a = _compare_int(failure_row.get("a", side_a.get("failures")))
+    failures_b = _compare_int(failure_row.get("b", side_b.get("failures")))
+    ended_a = "yes" if ended_row.get("a", side_a.get("ended_cleanly")) is True else "no"
+    ended_b = "yes" if ended_row.get("b", side_b.get("ended_cleanly")) is True else "no"
+    width = len("ended_cleanly")
+    header = [
+        f"{'compare':<{width}}  {_compare_id(side_a)} -> {_compare_id(side_b)}",
+        f"{'status':<{width}}  {_compare_status(side_a)} -> {_compare_status(side_b)}",
+        f"{'turns':<{width}}  {turns_a} -> {turns_b}{_compare_delta(turns_a, turns_b)}",
+        f"{'ended_cleanly':<{width}}  {ended_a} -> {ended_b}",
+        f"{'failures':<{width}}  {failures_a} -> {failures_b}{_compare_delta(failures_a, failures_b)}",
+    ]
+    body = "\n".join(
+        [
+            *header,
+            "",
+            _format_compare_tools(payload),
+            "",
+            _format_compare_files(payload),
+        ]
+    )
+    return body + "\n"
+
+
 def format_stats(stats: dict[str, Any]) -> str:
     """Compact text for ``sessions stats``. Field order is fixed."""
     tools = stats.get("tools") or {}
