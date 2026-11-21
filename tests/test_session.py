@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dm_agent.present import (
     format_changes,
+    format_compare,
     format_failures,
     format_files,
     format_inspection,
@@ -18,6 +19,7 @@ from dm_agent.session import (
     load_events,
     resolve_session_file,
     session_changes,
+    session_compare,
     session_failures,
     session_files,
     session_patch,
@@ -1559,3 +1561,310 @@ def test_session_prefix_and_ambiguous_id(tmp_path: Path) -> None:
         resolve_session_file(tmp_path, "20260101T000000Z-aaa")
     with pytest.raises(AgentError, match="not found"):
         resolve_session_file(tmp_path, "missing")
+
+
+def _baseline_events() -> list[dict]:
+    return [
+        {"session_id": "sess-a", "step": 0, "kind": "session_start", "task": "fix"},
+        {"step": 1, "kind": "thought", "content": "read first"},
+        _call(1, "read_file", "a-read", {"path": "math_utils.py"}),
+        _ok(1, "a-read"),
+        _call(2, "edit_file", "a-edit", {"path": "math_utils.py", "old": "a - b", "new": "a + b"}),
+        _ok(2, "a-edit"),
+        _call(2, "edit_file", "a-old", {"path": "./old.py", "old": "x", "new": "y"}),
+        _ok(2, "a-old"),
+        _call(3, "lint_python", "a-lint", {"path": "math_utils.py"}),
+        _ok(3, "a-lint"),
+        _call(3, "run_shell", "a-shell", {"command": "pytest -q"}),
+        _ok(3, "a-shell"),
+        {"step": 4, "kind": "final", "content": "done"},
+    ]
+
+
+def _candidate_events() -> list[dict]:
+    return [
+        {"session_id": "sess-b", "step": 0, "kind": "session_start", "task": "fix"},
+        _call(1, "read_file", "b-read", {"path": "math_utils.py"}),
+        _ok(1, "b-read"),
+        _call(2, "edit_file", "b-edit", {"path": "math_utils.py", "old": "a - b", "new": "a + b"}),
+        _ok(2, "b-edit"),
+        _call(3, "edit_file", "b-new", {"path": "new.py", "old": "x", "new": "y"}),
+        _ok(3, "b-new"),
+        _call(4, "lint_python", "b-lint", {"path": "math_utils.py"}),
+        _ok(4, "b-lint"),
+        _call(4, "edit_file", "b-fail", {"path": "missing.py", "old": "x", "new": "y"}),
+        {
+            "step": 4,
+            "kind": "tool_result",
+            "call_id": "b-fail",
+            "ok": False,
+            "output": "not found",
+        },
+        _call(4, "search", "b-search", {"path": "notes/find.py", "query": "x"}),
+        _ok(4, "b-search"),
+        {"step": 5, "kind": "final", "content": "done"},
+    ]
+
+
+def test_session_compare_deltas_tools_files_and_failures() -> None:
+    baseline = _baseline_events()
+    candidate = _candidate_events()
+    payload = session_compare(baseline, candidate)
+    assert list(payload) == [
+        "session_a",
+        "session_b",
+        "turns",
+        "failures",
+        "ended_cleanly",
+        "tools",
+        "files",
+    ]
+    assert list(payload["session_a"]) == [
+        "session_id",
+        "status",
+        "turns",
+        "ended_cleanly",
+        "failures",
+    ]
+    assert payload == {
+        "session_a": {
+            "session_id": "sess-a",
+            "status": "final",
+            "turns": 4,
+            "ended_cleanly": True,
+            "failures": 0,
+        },
+        "session_b": {
+            "session_id": "sess-b",
+            "status": "final",
+            "turns": 5,
+            "ended_cleanly": True,
+            "failures": 1,
+        },
+        "turns": {"a": 4, "b": 5, "delta": 1},
+        "failures": {"a": 0, "b": 1, "delta": 1},
+        "ended_cleanly": {"a": True, "b": True},
+        "tools": [
+            {"tool": "edit_file", "a": 2, "b": 3, "delta": 1},
+            {"tool": "lint_python", "a": 1, "b": 1, "delta": 0},
+            {"tool": "read_file", "a": 1, "b": 1, "delta": 0},
+            {"tool": "run_shell", "a": 1, "b": 0, "delta": -1},
+            {"tool": "search", "a": 0, "b": 1, "delta": 1},
+        ],
+        "files": {
+            "only_a": ["./old.py"],
+            "only_b": ["new.py"],
+            "both": ["math_utils.py"],
+        },
+    }
+    stats_a = session_stats(baseline)
+    stats_b = session_stats(candidate)
+    assert payload["turns"]["a"] == stats_a["turns"]
+    assert payload["turns"]["b"] == stats_b["turns"]
+    assert payload["session_a"]["ended_cleanly"] is stats_a["ended_cleanly"]
+    assert payload["failures"]["a"] == len(session_failures(baseline)["failures"])
+    assert payload["failures"]["b"] == len(session_failures(candidate)["failures"])
+    assert [row["tool"] for row in payload["tools"]] == sorted(
+        set(stats_a["tools"]) | set(stats_b["tools"])
+    )
+    listed = payload["files"]["only_a"] + payload["files"]["only_b"] + payload["files"]["both"]
+    assert "missing.py" not in listed
+    assert "notes/find.py" not in listed
+    assert "old.py" not in listed
+    assert "./old.py" in payload["files"]["only_a"]
+    for row in payload["tools"]:
+        assert list(row) == ["tool", "a", "b", "delta"]
+    text = format_compare(payload)
+    assert text == (
+        "compare        sess-a -> sess-b\n"
+        "status         final -> final\n"
+        "turns          4 -> 5  (+1)\n"
+        "ended_cleanly  yes -> yes\n"
+        "failures       0 -> 1  (+1)\n"
+        "\n"
+        "tools\n"
+        "  edit_file    2 -> 3  (+1)\n"
+        "  lint_python  1 -> 1\n"
+        "  read_file    1 -> 1\n"
+        "  run_shell    1 -> 0  (-1)\n"
+        "  search       0 -> 1  (+1)\n"
+        "\n"
+        "files\n"
+        "  only_a\n"
+        "    ./old.py\n"
+        "  only_b\n"
+        "    new.py\n"
+        "  both\n"
+        "    math_utils.py\n"
+    )
+    assert "(0)" not in text
+    assert text.endswith("\n")
+    assert not text.endswith("\n\n")
+
+
+def test_session_compare_identical_logs_have_zero_deltas() -> None:
+    baseline = _baseline_events()
+    payload = session_compare(baseline, baseline)
+    assert payload["session_a"] == payload["session_b"]
+    assert payload["turns"] == {"a": 4, "b": 4, "delta": 0}
+    assert payload["failures"] == {"a": 0, "b": 0, "delta": 0}
+    assert payload["ended_cleanly"] == {"a": True, "b": True}
+    assert payload["files"] == {
+        "only_a": [],
+        "only_b": [],
+        "both": ["./old.py", "math_utils.py"],
+    }
+    assert [row["delta"] for row in payload["tools"]] == [0, 0, 0, 0]
+    assert [row["a"] for row in payload["tools"]] == [row["b"] for row in payload["tools"]]
+    text = format_compare(payload)
+    assert text == (
+        "compare        sess-a -> sess-a\n"
+        "status         final -> final\n"
+        "turns          4 -> 4\n"
+        "ended_cleanly  yes -> yes\n"
+        "failures       0 -> 0\n"
+        "\n"
+        "tools\n"
+        "  edit_file    2 -> 2\n"
+        "  lint_python  1 -> 1\n"
+        "  read_file    1 -> 1\n"
+        "  run_shell    1 -> 1\n"
+        "\n"
+        "files\n"
+        "  only_a\n"
+        "    (none)\n"
+        "  only_b\n"
+        "    (none)\n"
+        "  both\n"
+        "    ./old.py\n"
+        "    math_utils.py\n"
+    )
+    assert "(0)" not in text
+
+
+def test_session_compare_status_and_clean_ending(tmp_path: Path) -> None:
+    clean = [{"session_id": "ok", "step": 1, "kind": "final", "content": "done"}]
+    stopped = [{"session_id": "stop", "step": 3, "kind": "max_steps", "content": "stopped"}]
+    payload = session_compare(clean, stopped)
+    assert payload["session_a"]["status"] == "final"
+    assert payload["session_a"]["ended_cleanly"] is True
+    assert payload["session_b"]["status"] == "max_steps"
+    assert payload["session_b"]["ended_cleanly"] is False
+    assert payload["session_b"]["failures"] == 0
+    assert payload["turns"] == {"a": 1, "b": 1, "delta": 0}
+    assert format_compare(payload) == (
+        "compare        ok -> stop\n"
+        "status         final -> max_steps\n"
+        "turns          1 -> 1\n"
+        "ended_cleanly  yes -> no\n"
+        "failures       0 -> 0\n"
+        "\n"
+        "tools (none)\n"
+        "\n"
+        "files (none)\n"
+    )
+
+    failed = [{"session_id": "err", "step": 1, "kind": "error", "content": "boom"}]
+    broken = session_compare(clean, failed)
+    assert broken["session_b"]["status"] == "error"
+    assert broken["session_b"]["ended_cleanly"] is False
+    assert broken["failures"] == {"a": 0, "b": 1, "delta": 1}
+    assert "status         final -> error\n" in format_compare(broken)
+    assert "ended_cleanly  yes -> no\n" in format_compare(broken)
+
+    late = [
+        {"session_id": "late", "step": 1, "kind": "final", "content": "done"},
+        {"step": 2, "kind": "error", "content": "after"},
+    ]
+    late_payload = session_compare(late, [])
+    assert late_payload["session_a"]["status"] == "final"
+    assert late_payload["session_a"]["ended_cleanly"] is False
+    assert late_payload["failures"]["a"] == len(session_failures(late)["failures"]) == 1
+    assert late_payload["turns"]["a"] == 2
+
+    recovered = [
+        {"session_id": "re", "step": 1, "kind": "error", "content": "boom"},
+        {"step": 2, "kind": "final", "content": "done"},
+    ]
+    recovered_payload = session_compare(recovered, recovered)
+    assert recovered_payload["session_a"]["status"] == "final"
+    assert recovered_payload["session_a"]["ended_cleanly"] is True
+    assert recovered_payload["failures"]["delta"] == 0
+    assert recovered_payload["failures"]["a"] == 1
+
+    forced = session_compare(clean, failed, status_a="max_steps", status_b="open")
+    assert forced["session_a"]["status"] == "max_steps"
+    assert forced["session_b"]["status"] == "open"
+    assert session_compare(clean, failed)["session_a"]["status"] == "final"
+
+    blank = [
+        {"session_id": "", "step": 0, "kind": "session_start"},
+        {"session_id": "later", "step": 1, "kind": "final", "content": "done"},
+    ]
+    blank_payload = session_compare(blank, [], session_id_a="from-stem")
+    assert blank_payload["session_a"]["session_id"] == "from-stem"
+    assert session_stats(blank, session_id="from-stem")["session_id"] == "later"
+
+    path = tmp_path / "20260101T000000Z-abc111.jsonl"
+    recorded = [
+        {"session_id": path.stem, "step": 1, "kind": "error", "content": "boom"},
+        {"step": 2, "kind": "max_steps", "content": "stopped"},
+    ]
+    path.write_text("".join(json.dumps(line) + "\n" for line in recorded), encoding="utf-8")
+    events = load_events(path)
+    summary = summarize_session(path)
+    from_file = session_compare(events, [], session_id_a=path.stem)
+    assert summary["status"] == "max_steps"
+    assert from_file["session_a"]["status"] == summary["status"]
+    assert from_file["session_a"]["session_id"] == summary["session_id"]
+    assert from_file["session_a"]["ended_cleanly"] is False
+    assert from_file["session_a"]["failures"] == len(session_failures(events)["failures"]) == 1
+    passed = session_compare(
+        events,
+        [],
+        session_id_a=path.stem,
+        status_a=summary["status"],
+    )
+    assert passed["session_a"]["status"] == summary["status"]
+
+
+def test_session_compare_empty_events() -> None:
+    payload = session_compare([], [])
+    assert payload == {
+        "session_a": {
+            "session_id": "",
+            "status": "open",
+            "turns": 0,
+            "ended_cleanly": False,
+            "failures": 0,
+        },
+        "session_b": {
+            "session_id": "",
+            "status": "open",
+            "turns": 0,
+            "ended_cleanly": False,
+            "failures": 0,
+        },
+        "turns": {"a": 0, "b": 0, "delta": 0},
+        "failures": {"a": 0, "b": 0, "delta": 0},
+        "ended_cleanly": {"a": False, "b": False},
+        "tools": [],
+        "files": {"only_a": [], "only_b": [], "both": []},
+    }
+    named = session_compare([], [], session_id_a="stem-a", session_id_b="stem-b")
+    assert named["session_a"]["session_id"] == "stem-a"
+    assert named["session_b"]["session_id"] == "stem-b"
+    text = format_compare(payload)
+    assert text == (
+        "compare        (unknown) -> (unknown)\n"
+        "status         open -> open\n"
+        "turns          0 -> 0\n"
+        "ended_cleanly  no -> no\n"
+        "failures       0 -> 0\n"
+        "\n"
+        "tools (none)\n"
+        "\n"
+        "files (none)\n"
+    )
+    assert format_compare({}) == text
+    assert "(0)" not in text

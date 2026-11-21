@@ -14,6 +14,7 @@ from dm_agent.errors import AgentError, ConfigError, LLMError
 from dm_agent.llm import OpenAICompatibleLLM, public_base_url
 from dm_agent.present import (
     format_changes,
+    format_compare,
     format_failures,
     format_files,
     format_inspection,
@@ -27,6 +28,7 @@ from dm_agent.session import (
     load_events,
     resolve_session_file,
     session_changes,
+    session_compare,
     session_failures,
     session_files,
     session_patch,
@@ -139,6 +141,19 @@ def build_parser() -> argparse.ArgumentParser:
     failures.add_argument("session_id", help="Session id or a unique prefix.")
     failures.add_argument("--json", action="store_true", help="Print the failures as JSON.")
     failures.set_defaults(handler=cmd_failures)
+
+    compare = session_sub.add_parser(
+        "compare",
+        parents=[common],
+        help="Compare two recorded session logs. Does not diff the workspace or re-run tools.",
+    )
+    compare.add_argument("session_a", help="Baseline session id or a unique prefix.")
+    compare.add_argument(
+        "session_b",
+        help="Candidate session id or a unique prefix. Deltas are this session minus the baseline.",
+    )
+    compare.add_argument("--json", action="store_true", help="Print the comparison as JSON.")
+    compare.set_defaults(handler=cmd_compare)
 
     replay = session_sub.add_parser(
         "replay",
@@ -303,6 +318,29 @@ def cmd_failures(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare two session logs. Tools are not executed and the model is not called."""
+    path_a = _session_path(args, args.session_a)
+    path_b = _session_path(args, args.session_b)
+    summary_a = summarize_session(path_a)
+    summary_b = summarize_session(path_b)
+    payload = session_compare(
+        load_events(path_a),
+        load_events(path_b),
+        session_id_a=path_a.stem,
+        session_id_b=path_b.stem,
+        status_a=summary_a["status"],
+        status_b=summary_b["status"],
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file_a {path_a}")
+    print(f"file_b {path_b}")
+    sys.stdout.write(format_compare(payload))
+    return 0
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     """Reprint the transcript from the log. Tools are not executed."""
     path = _session_path(args)
@@ -336,9 +374,10 @@ def _session_config(args: argparse.Namespace):
     )
 
 
-def _session_path(args: argparse.Namespace) -> Path:
+def _session_path(args: argparse.Namespace, token: str | None = None) -> Path:
     cfg = _session_config(args)
-    token = args.session_id
+    if token is None:
+        token = args.session_id
     if token.endswith(".jsonl"):
         token = token[: -len(".jsonl")]
     return resolve_session_file(cfg.log_dir, token)

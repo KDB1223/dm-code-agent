@@ -613,3 +613,149 @@ def summarize_session(path: Path) -> dict[str, Any]:
     except OSError as exc:
         raise AgentError(f"cannot read {path}: {exc}") from exc
     return summary
+
+
+def _summary_session_id(events: list[dict[str, Any]], fallback: str) -> str:
+    """Session id ``summarize_session`` would keep for these events.
+
+    The first JSON object wins. A truthy ``session_id`` is stringified.
+    A missing or empty id, or a log with no object, uses ``fallback``
+    (the file stem, when the caller has one). Later events are not
+    consulted. This is not ``session_stats``, which walks the log for
+    the first non-empty string id.
+    """
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        raw = event.get("session_id")
+        if raw:
+            return str(raw)
+        return fallback
+    return fallback
+
+
+def _summary_status(events: list[dict[str, Any]]) -> str:
+    """Status word ``summarize_session`` would record for these events.
+
+    ``open`` until a ``final`` or ``max_steps`` event. An ``error`` event
+    sets ``error`` only when no ``final`` or ``max_steps`` has already
+    been seen, so a later ``error`` does not replace those. A non-dict
+    item sets ``corrupt``. A log ``load_events`` can read has no
+    non-dict items; ``sessions compare`` still reports the status
+    ``summarize_session`` computed for the file when the caller passes it.
+    """
+    status = "open"
+    for event in events:
+        if not isinstance(event, dict):
+            status = "corrupt"
+            continue
+        kind = event.get("kind")
+        if kind == "final":
+            status = "final"
+        elif kind == "max_steps":
+            status = "max_steps"
+        elif kind == "error" and status not in {"final", "max_steps"}:
+            status = "error"
+    return status
+
+
+def _resolve_status(events: list[dict[str, Any]], status: str | None) -> str:
+    """Use a caller-supplied status, or the ``summarize_session`` rules."""
+    if status is None:
+        return _summary_status(events)
+    if isinstance(status, str):
+        return status
+    return str(status)
+
+
+def session_compare(
+    events_a: list[dict[str, Any]],
+    events_b: list[dict[str, Any]],
+    *,
+    session_id_a: str = "",
+    session_id_b: str = "",
+    status_a: str | None = None,
+    status_b: str | None = None,
+) -> dict[str, Any]:
+    """Compare two loaded session logs. Deltas are B minus A.
+
+    ``SESSION_A`` is the baseline and ``SESSION_B`` is the candidate.
+    The comparison is built from helpers that already read one log:
+
+    * ``session_id`` follows ``summarize_session`` (see
+      ``_summary_session_id``). ``session_id_a`` and ``session_id_b``
+      are the fallbacks, normally the file stems.
+    * ``status`` is ``status_a`` / ``status_b`` when the caller passes
+      them (the CLI passes ``summarize_session``). Otherwise it is
+      ``_summary_status``, the same rules. Status is not
+      ``ended_cleanly``: a ``final`` followed by ``error`` stays
+      ``final`` here, while ``session_stats`` reports the last terminal
+      kind.
+    * ``turns``, ``ended_cleanly``, ``tools``, and ``files`` come from
+      ``session_stats``. Tool rows are the sorted union of those tool
+      maps. A name present on only one side is 0 on the other. A row
+      with delta 0 is kept. A name that is 0 on both sides is absent,
+      because ``session_stats`` does not emit it.
+    * ``files`` are the successful ``edit_file`` and ``write_file``
+      paths from ``session_stats``, compared as recorded strings with
+      no normalization. ``only_a``, ``only_b``, and ``both`` are sorted.
+    * ``failures`` is the number of entries ``session_failures`` lists
+      for that log. It is not a second definition of a failed call.
+
+    Comparing a log to itself yields zero deltas, every edited path in
+    ``both``, and empty ``only_a`` / ``only_b``. Empty event lists are
+    valid: status ``open``, zero turns, zero failures, no tools, no
+    files. This reads the events only. It does not call a model,
+    execute tools, or diff a workspace.
+    """
+    resolved_status_a = _resolve_status(events_a, status_a)
+    resolved_status_b = _resolve_status(events_b, status_b)
+
+    id_a = _summary_session_id(events_a, session_id_a)
+    id_b = _summary_session_id(events_b, session_id_b)
+    stats_a = session_stats(events_a, session_id=session_id_a)
+    stats_b = session_stats(events_b, session_id=session_id_b)
+    failures_a = len(session_failures(events_a, session_id=session_id_a)["failures"])
+    failures_b = len(session_failures(events_b, session_id=session_id_b)["failures"])
+
+    names = sorted(set(stats_a["tools"]) | set(stats_b["tools"]))
+    tools: list[dict[str, Any]] = []
+    for name in names:
+        count_a = stats_a["tools"].get(name, 0)
+        count_b = stats_b["tools"].get(name, 0)
+        tools.append({"tool": name, "a": count_a, "b": count_b, "delta": count_b - count_a})
+
+    files_a = set(stats_a["files"])
+    files_b = set(stats_b["files"])
+    return {
+        "session_a": {
+            "session_id": id_a,
+            "status": resolved_status_a,
+            "turns": stats_a["turns"],
+            "ended_cleanly": stats_a["ended_cleanly"],
+            "failures": failures_a,
+        },
+        "session_b": {
+            "session_id": id_b,
+            "status": resolved_status_b,
+            "turns": stats_b["turns"],
+            "ended_cleanly": stats_b["ended_cleanly"],
+            "failures": failures_b,
+        },
+        "turns": {
+            "a": stats_a["turns"],
+            "b": stats_b["turns"],
+            "delta": stats_b["turns"] - stats_a["turns"],
+        },
+        "failures": {"a": failures_a, "b": failures_b, "delta": failures_b - failures_a},
+        "ended_cleanly": {
+            "a": stats_a["ended_cleanly"],
+            "b": stats_b["ended_cleanly"],
+        },
+        "tools": tools,
+        "files": {
+            "only_a": sorted(files_a - files_b),
+            "only_b": sorted(files_b - files_a),
+            "both": sorted(files_a & files_b),
+        },
+    }
