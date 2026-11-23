@@ -11,6 +11,7 @@ from dm_agent.present import (
     format_inspection,
     format_patch,
     format_stats,
+    format_tools,
     format_transcript,
     render_html,
 )
@@ -24,6 +25,7 @@ from dm_agent.session import (
     session_files,
     session_patch,
     session_stats,
+    session_tools,
     summarize_session,
 )
 
@@ -1095,6 +1097,278 @@ def test_session_files_empty_events_and_format() -> None:
         "\n"
         "math_utils.py\n"
         "  read_file ok=1 fail=0\n"
+    )
+
+
+def test_session_tools_counts_ok_fail_and_paths_in_log_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    events = [
+        {"session_id": "sess-1", "step": 0, "kind": "session_start", "task": "audit"},
+        _call(1, "read_file", "c-read", {"path": "math_utils.py"}),
+        _ok(1, "c-read"),
+        _call(2, "edit_file", "c-edit", {"path": "math_utils.py", "old": "a - b", "new": "a + b"}),
+        _ok(2, "c-edit"),
+        _call(2, "edit_file", "c-fail", {"path": "math_utils.py", "old": "missing", "new": "nope"}),
+        _ok(2, "c-fail", ok=False),
+        _call(3, "run_shell", "c-shell", {"command": "pytest -q"}),
+        _ok(3, "c-shell"),
+        _call(4, "write_file", "c-unpaired", {"path": "./notes/out.txt", "content": "later"}),
+        _call(4, "read_file", "c-again", {"path": "./notes/out.txt"}),
+        _ok(4, "c-again"),
+        _call(5, "read_file", "c-dup", {"path": "math_utils.py"}),
+        _ok(5, "c-dup"),
+        _call(5, "search", "c-dot", {"path": "./notes/out.txt", "query": "later", "file": "other.py"}),
+        _ok(5, "c-dot"),
+        _call(6, "lint_python", "c-num", {"path": "a.py"}),
+        {"step": 6, "kind": "tool_result", "call_id": "c-num", "ok": 1},
+        _call(6, "run_pytest", "", {"path": "tests"}),
+        {"step": 6, "kind": "tool_result", "call_id": "", "ok": True},
+        {"step": 6, "kind": "tool_call", "tool": "list_dir", "arguments": {"path": "src"}},
+        {
+            "step": 6,
+            "kind": "tool_call",
+            "tool": "search",
+            "call_id": 7,
+            "arguments": {"path": "g.py", "query": "x"},
+        },
+        _call(7, "read_file", "c-space", {"path": " "}),
+        _ok(7, "c-space"),
+        _call(7, "read_file", "c-rel", {"path": "a.py/../a.py"}),
+        _ok(7, "c-rel"),
+        _call(7, "read_file", "c-empty", {"path": ""}),
+        _ok(7, "c-empty"),
+        _call(7, "read_file", "c-numpath", {"path": 3}),
+        _ok(7, "c-numpath"),
+        {
+            "step": 7,
+            "kind": "tool_call",
+            "tool": "edit_file",
+            "call_id": "c-list",
+            "arguments": ["math_utils.py"],
+        },
+        _ok(7, "c-list"),
+        {"step": 7, "kind": "tool_call", "tool": "write_file", "call_id": "c-no-args"},
+        {
+            "step": 7,
+            "kind": "tool_call",
+            "tool": "",
+            "call_id": "c-blank",
+            "arguments": {"path": "blank.py"},
+        },
+        {
+            "step": 7,
+            "kind": "tool_call",
+            "tool": 3,
+            "call_id": "c-badtool",
+            "arguments": {"path": "nope.py"},
+        },
+        {"step": 7, "kind": "tool_call", "call_id": "c-notool", "arguments": {"path": "missing.py"}},
+        _call(8, "run_shell", "c-sh-fail", {"command": "pwd", "cwd": "elsewhere"}),
+        _ok(8, "c-sh-fail", ok=False),
+        _call(8, "run_shell", "c-sh-path", {"path": "script.sh", "command": "python script.sh"}),
+        _ok(8, "c-sh-path"),
+        _call(9, "lint_python", "c-flip-ok", {"path": "b.py"}),
+        _ok(9, "c-flip-ok", ok=False),
+        _ok(9, "c-flip-ok"),
+        _call(9, "search", "c-flip-fail", {"path": "b.py", "query": "q"}),
+        _ok(9, "c-flip-fail"),
+        _ok(9, "c-flip-fail", ok=False),
+        {
+            "step": 10,
+            "kind": "tool_result",
+            "tool": "read_file",
+            "call_id": "c-ghost",
+            "ok": True,
+            "arguments": {"path": "ghost.py"},
+        },
+        {"step": 10, "kind": "error", "content": "boom"},
+        {"step": 10, "kind": "final", "content": "done"},
+        {"step": 10, "kind": "thought", "content": "nope"},
+    ]
+    payload = session_tools(events)
+    assert list(payload) == ["session_id", "tools"]
+    assert payload == {
+        "session_id": "sess-1",
+        "tools": [
+            {
+                "tool": "read_file",
+                "ok": 7,
+                "fail": 0,
+                "paths": ["math_utils.py", "./notes/out.txt", " ", "a.py/../a.py"],
+            },
+            {
+                "tool": "edit_file",
+                "ok": 2,
+                "fail": 1,
+                "paths": ["math_utils.py"],
+            },
+            {
+                "tool": "run_shell",
+                "ok": 2,
+                "fail": 1,
+                "paths": ["script.sh"],
+            },
+            {
+                "tool": "write_file",
+                "ok": 0,
+                "fail": 2,
+                "paths": ["./notes/out.txt"],
+            },
+            {
+                "tool": "search",
+                "ok": 1,
+                "fail": 2,
+                "paths": ["./notes/out.txt", "g.py", "b.py"],
+            },
+            {
+                "tool": "lint_python",
+                "ok": 1,
+                "fail": 1,
+                "paths": ["a.py", "b.py"],
+            },
+            {
+                "tool": "run_pytest",
+                "ok": 0,
+                "fail": 1,
+                "paths": ["tests"],
+            },
+            {
+                "tool": "list_dir",
+                "ok": 0,
+                "fail": 1,
+                "paths": ["src"],
+            },
+        ],
+    }
+    for row in payload["tools"]:
+        assert list(row) == ["tool", "ok", "fail", "paths"]
+        assert row["ok"] + row["fail"] > 0
+    names = [row["tool"] for row in payload["tools"]]
+    assert names == [
+        "read_file",
+        "edit_file",
+        "run_shell",
+        "write_file",
+        "search",
+        "lint_python",
+        "run_pytest",
+        "list_dir",
+    ]
+    assert names != sorted(names)
+    recorded = [path for row in payload["tools"] for path in row["paths"]]
+    assert "blank.py" not in recorded
+    assert "nope.py" not in recorded
+    assert "missing.py" not in recorded
+    assert "ghost.py" not in recorded
+    assert "other.py" not in recorded
+    assert "elsewhere" not in recorded
+    assert "pytest -q" not in recorded
+    assert "" not in recorded
+    assert recorded.count("math_utils.py") == 2
+    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / "math_utils.py").exists()
+    assert not (tmp_path / "notes").exists()
+    assert not (tmp_path / "script.sh").exists()
+    assert not (tmp_path / "ghost.py").exists()
+    text = format_tools(payload)
+    assert text == (
+        "session sess-1\n"
+        "tools 8\n"
+        "\n"
+        "read_file ok=7 fail=0\n"
+        "  math_utils.py\n"
+        "  ./notes/out.txt\n"
+        "   \n"
+        "  a.py/../a.py\n"
+        "\n"
+        "edit_file ok=2 fail=1\n"
+        "  math_utils.py\n"
+        "\n"
+        "run_shell ok=2 fail=1\n"
+        "  script.sh\n"
+        "\n"
+        "write_file ok=0 fail=2\n"
+        "  ./notes/out.txt\n"
+        "\n"
+        "search ok=1 fail=2\n"
+        "  ./notes/out.txt\n"
+        "  g.py\n"
+        "  b.py\n"
+        "\n"
+        "lint_python ok=1 fail=1\n"
+        "  a.py\n"
+        "  b.py\n"
+        "\n"
+        "run_pytest ok=0 fail=1\n"
+        "  tests\n"
+        "\n"
+        "list_dir ok=0 fail=1\n"
+        "  src\n"
+    )
+    assert not text.endswith("\n\n")
+
+
+def test_session_tools_empty_events_and_format() -> None:
+    assert session_tools([]) == {"session_id": "", "tools": []}
+    assert format_tools(session_tools([])) == "session (unknown)\ntools 0\n"
+    assert format_tools({"session_id": "s", "tools": []}) == "session s\ntools 0\n"
+    assert format_tools({"session_id": "s", "tools": None}) == "session s\ntools 0\n"
+    assert format_tools({}) == "session (unknown)\ntools 0\n"
+    fallback = session_tools(
+        [{"kind": "final", "step": 1, "content": "done"}],
+        session_id="from-stem",
+    )
+    assert fallback == {"session_id": "from-stem", "tools": []}
+    assert format_tools(fallback) == "session from-stem\ntools 0\n"
+    logged = session_tools(
+        [
+            {"session_id": "", "kind": "tool_call", "tool": "read_file", "call_id": "c", "arguments": {"path": "a.py"}},
+            {"session_id": "later", "kind": "final", "step": 2, "content": "done"},
+        ],
+        session_id="from-stem",
+    )
+    assert logged == {
+        "session_id": "later",
+        "tools": [{"tool": "read_file", "ok": 0, "fail": 1, "paths": ["a.py"]}],
+    }
+    small = {
+        "session_id": "s",
+        "tools": [
+            {"tool": "read_file", "ok": 1, "fail": 0, "paths": ["math_utils.py", "./a.py"]},
+            {"tool": "run_shell", "ok": 1, "fail": 1, "paths": []},
+        ],
+    }
+    assert format_tools(small) == (
+        "session s\n"
+        "tools 2\n"
+        "\n"
+        "read_file ok=1 fail=0\n"
+        "  math_utils.py\n"
+        "  ./a.py\n"
+        "\n"
+        "run_shell ok=1 fail=1\n"
+    )
+    skipped = format_tools(
+        {
+            "session_id": "s",
+            "tools": [
+                None,
+                "read_file",
+                {"tool": "read_file", "ok": True, "fail": "x", "paths": ["", 3, "a.py"]},
+                {"tool": None, "ok": 1, "fail": 0, "paths": None},
+            ],
+        }
+    )
+    assert skipped == (
+        "session s\n"
+        "tools 2\n"
+        "\n"
+        "read_file ok=0 fail=0\n"
+        "  a.py\n"
+        "\n"
+        " ok=1 fail=0\n"
     )
 
 

@@ -363,6 +363,70 @@ def session_files(events: list[dict[str, Any]], *, session_id: str = "") -> dict
     }
 
 
+def session_tools(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """Inventory tool calls grouped by tool name, with ok/fail counts and paths.
+
+    Only ``tool_call`` events are walked. A call is counted when ``tool``
+    is a non-empty string. A call whose ``tool`` is missing, not a string,
+    or empty is omitted, because there is no name to group.
+
+    A call is ok when ``_tool_result_ok`` maps its ``call_id`` to true:
+    the last ``tool_result`` with that id has ``ok`` true. Otherwise it
+    is a fail. That includes a failed result, a result whose ``ok`` is
+    not true, and an unpaired call. A missing or empty ``call_id``
+    cannot be paired, so that call is a fail.
+
+    Tools stay in first-seen log order, not alphabetical. For each tool,
+    unique ``arguments.path`` values that are non-empty strings are
+    collected in first-seen order. The logged string is kept as-is. It
+    is not normalized, resolved, or rewritten. A call whose arguments
+    are missing or not a dict, or whose path is missing, not a string,
+    or empty, adds no path. Paths are not taken from any other argument
+    key. A tool that recorded no path, such as a typical ``run_shell``,
+    is still included.
+
+    ``session_id`` is the first id in the log, or the provided
+    ``session_id`` when the log has none. This reads the events only.
+    It does not list or diff the workspace, call a model, or execute
+    tools, and it does not open any path from the log.
+    """
+    result_ok = _tool_result_ok(events)
+    tools: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+    seen_paths: dict[str, set[str]] = {}
+    for event in events:
+        if event.get("kind") != "tool_call":
+            continue
+        tool = event.get("tool")
+        if not isinstance(tool, str) or tool == "":
+            continue
+        call_id = event.get("call_id")
+        succeeded = (
+            isinstance(call_id, str) and call_id != "" and result_ok.get(call_id) is True
+        )
+        row = by_name.get(tool)
+        if row is None:
+            row = {"tool": tool, "ok": 0, "fail": 0, "paths": []}
+            by_name[tool] = row
+            seen_paths[tool] = set()
+            tools.append(row)
+        if succeeded:
+            row["ok"] += 1
+        else:
+            row["fail"] += 1
+        arguments = event.get("arguments")
+        if not isinstance(arguments, dict):
+            continue
+        path = arguments.get("path")
+        if isinstance(path, str) and path != "" and path not in seen_paths[tool]:
+            seen_paths[tool].add(path)
+            row["paths"].append(path)
+    return {
+        "session_id": _first_session_id(events, session_id),
+        "tools": tools,
+    }
+
+
 def session_failures(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
     """List failed tool calls and session ``error`` events in log order.
 

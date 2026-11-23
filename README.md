@@ -12,7 +12,7 @@ Hosted chat hides the tool trace. dm-agent keeps the trace on disk, next to the 
 - **ReAct loop.** Plan, call a tool, read the observation, repeat until a final answer or the step limit.
 - **Workspace tools.** Read, write, edit, list, and search. The shell refuses commands that point outside the project.
 - **Course tools.** `lint_python` reports syntax errors, bare `except`, and leftover `breakpoint()` calls. `run_pytest` returns a structured pass/fail summary.
-- **Audit log.** Append-only JSONL under `.dm-agent/sessions/`, with `list`, `show`, `stats`, `changes`, `patch`, `files`, `failures`, `compare`, and a dry `replay` that does not re-run tools.
+- **Audit log.** Append-only JSONL under `.dm-agent/sessions/`, with `list`, `show`, `stats`, `changes`, `patch`, `files`, `tools`, `failures`, `compare`, and a dry `replay` that does not re-run tools.
 - **Offline evals.** Three toy tasks with golden checks. `python -m evals.run` prints `score 3/3` without an API key.
 
 **Topics:** `coding-agent` `react` `auditability` `local-first` `llm` `education`
@@ -75,6 +75,7 @@ python -m dm_agent sessions stats SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions changes SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions patch SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions files SESSION_ID --workspace examples/demo_workspace
+python -m dm_agent sessions tools SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions failures SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions compare SESSION_A SESSION_B --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
@@ -88,7 +89,7 @@ The session file is:
 examples/demo_workspace/.dm-agent/sessions/<session-id>.jsonl
 ```
 
-`replay` reprints the transcript from that file. It does not call the model and does not edit the workspace again. `changes` lists every successful `edit_file` and `write_file` recorded in that file, in log order. It does not diff the workspace or re-run tools. `patch` prints those same mutations as unified diffs rebuilt from the logged arguments, not from a live workspace diff. A `write_file` is the recorded content as a full-file add, not a deletion of any previous workspace bytes. `files` lists every path a tool call recorded, including reads, lints, searches, and failed edits, with per-tool ok/fail counts. It only reads the JSONL and is not a listing of the current workspace. `failures` lists each failed tool call and each session error event in log order, including calls that recorded no path. It only reads the JSONL and does not re-run tools. `compare` reads two of those logs and prints the candidate minus the baseline: turns, failure counts, tool counts, and paths recorded on successful edits. It does not diff the workspace or score the model.
+`replay` reprints the transcript from that file. It does not call the model and does not edit the workspace again. `changes` lists every successful `edit_file` and `write_file` recorded in that file, in log order. It does not diff the workspace or re-run tools. `patch` prints those same mutations as unified diffs rebuilt from the logged arguments, not from a live workspace diff. A `write_file` is the recorded content as a full-file add, not a deletion of any previous workspace bytes. `files` lists every path a tool call recorded, including reads, lints, searches, and failed edits, with per-tool ok/fail counts. It only reads the JSONL and is not a listing of the current workspace. `tools` lists each tool called in that file, in first-seen order, with ok and fail counts, including tools that recorded no path. Each tool also lists the unique paths those calls recorded. It only reads the JSONL and does not re-run tools. `failures` lists each failed tool call and each session error event in log order, including calls that recorded no path. It only reads the JSONL and does not re-run tools. `compare` reads two of those logs and prints the candidate minus the baseline: turns, failure counts, tool counts, and paths recorded on successful edits. It does not diff the workspace or score the model.
 
 ## Sample transcript
 
@@ -179,6 +180,7 @@ python -m dm_agent sessions stats SESSION --workspace PATH
 python -m dm_agent sessions changes SESSION --workspace PATH
 python -m dm_agent sessions patch SESSION --workspace PATH
 python -m dm_agent sessions files SESSION --workspace PATH
+python -m dm_agent sessions tools SESSION --workspace PATH
 python -m dm_agent sessions failures SESSION --workspace PATH
 python -m dm_agent sessions compare SESSION_A SESSION_B --workspace PATH
 python -m dm_agent sessions replay SESSION --workspace PATH
@@ -221,6 +223,8 @@ Each line is one JSON object. Lines are appended and `fsync`'d. A crash keeps ev
 `sessions patch` reads the same JSONL and prints a unified diff for every mutation `sessions changes` would list, in the same order. An `edit_file` becomes a snippet hunk (`@@ -1,N +1,M @@`) built from the recorded `old` and `new` text, with no surrounding context. A `write_file` is a full-file add of the recorded content (`--- /dev/null`), not a deletion of any previous workspace bytes. Repeated edits to the same path stay separate diffs. `replace_all=true` is a comment above that file header and is not expanded into extra hunks. The patch is rebuilt from logged arguments, not from a live diff of the workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the patches as JSON, including each `diff` string.
 
 `sessions files` reads the same JSONL and lists every path a tool call recorded, with per-tool ok/fail counts. Any call that logged a non-empty `path` is included: reads, lints, searches, and failed edits. A failed result and an unpaired call count as fail. It is not a listing of the current workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the inventory as JSON.
+
+`sessions tools` reads the same JSONL and lists each tool that was called, in first-seen order, with ok and fail counts. A call is ok when its last paired `tool_result` has `ok` true. A failed result, a result whose `ok` is not true, an unpaired call, and a missing or empty `call_id` count as fail. Tools that recorded no path, such as a typical `run_shell`, are included. Each tool also lists the unique non-empty `arguments.path` strings those calls recorded, in first-seen order, unnormalized. A call without a usable path adds no path, and other argument keys are not turned into paths. It is not a listing of the current workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the inventory as JSON.
 
 `sessions failures` reads the same JSONL and lists each failed tool call and each session `error` event, in log order. A call is included when its last result is not ok, when it has no paired result, or when it has no `call_id`, including tools that recorded no path, such as `run_shell`. Each entry has the step, call id, status (`failed` or `unpaired`), the logged path when there is one, and the logged output. It is not a listing of the current workspace. It does not need an API key, and it does not call the model or re-run tools. `--json` prints the list as JSON.
 
