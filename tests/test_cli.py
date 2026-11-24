@@ -12,6 +12,7 @@ from dm_agent.present import (
     format_failures,
     format_files,
     format_patch,
+    format_tools,
 )
 from dm_agent.session import (
     SessionLog,
@@ -21,6 +22,7 @@ from dm_agent.session import (
     session_failures,
     session_files,
     session_patch,
+    session_tools,
     summarize_session,
 )
 
@@ -435,6 +437,117 @@ def test_files_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, c
     assert "你好" in text
 
 
+def test_tools_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log = _sample_log(tmp_path)
+    log.append(
+        kind="tool_call",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        arguments={"path": "a.py", "old": "missing", "new": "nope"},
+    )
+    log.append(
+        kind="tool_result",
+        step=2,
+        tool="edit_file",
+        call_id="c-fail",
+        ok=False,
+        output="old string was not found",
+    )
+    log.append(
+        kind="tool_call",
+        step=3,
+        tool="write_file",
+        call_id="c-open",
+        arguments={"path": "notes/你好.txt", "content": "你好"},
+    )
+    log.append(
+        kind="tool_call",
+        step=4,
+        tool="run_shell",
+        call_id="c-shell",
+        arguments={"command": "pytest -q"},
+    )
+    log.append(
+        kind="tool_result",
+        step=4,
+        tool="run_shell",
+        call_id="c-shell",
+        ok=True,
+        output="passed",
+    )
+    log.append(
+        kind="tool_call",
+        step=5,
+        tool="search",
+        call_id="c-search",
+        arguments={"path": "notes/你好.txt", "query": "你好"},
+    )
+    log.append(
+        kind="tool_result",
+        step=5,
+        tool="search",
+        call_id="c-search",
+        ok=True,
+        output="notes/你好.txt:1",
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("tools must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("tools must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    assert main(["sessions", "tools", log.session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "tools", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    expected = session_tools(load_events(log.path), session_id=log.session_id)
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    payload = json.loads(first)
+    assert payload["session_id"] == log.session_id
+    assert [item["tool"] for item in payload["tools"]] == [
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_shell",
+        "search",
+    ]
+    assert payload["tools"][0] == {"tool": "read_file", "ok": 1, "fail": 0, "paths": ["a.py"]}
+    assert payload["tools"][1] == {"tool": "edit_file", "ok": 0, "fail": 1, "paths": ["a.py"]}
+    assert payload["tools"][2] == {
+        "tool": "write_file",
+        "ok": 0,
+        "fail": 1,
+        "paths": ["notes/你好.txt"],
+    }
+    assert payload["tools"][3] == {"tool": "run_shell", "ok": 1, "fail": 0, "paths": []}
+    assert payload["tools"][4] == {
+        "tool": "search",
+        "ok": 1,
+        "fail": 0,
+        "paths": ["notes/你好.txt"],
+    }
+    assert "你好" in first
+    assert "\\u" not in first
+    assert "run_shell" in first
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "notes").exists()
+
+    assert main(["sessions", "tools", log.session_id, "--workspace", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert text == f"file {log.path}\n" + format_tools(expected)
+    assert "ok=1 fail=0" in text
+    assert "run_shell ok=1 fail=0\n" in text
+    assert "你好" in text
+
+
 def test_failures_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
     _isolate(monkeypatch, tmp_path)
     log = _sample_log(tmp_path)
@@ -527,7 +640,8 @@ def test_sessions_help_lists_failures(capsys) -> None:
         main(["sessions", "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{list,show,stats,changes,patch,files,failures,compare,replay,html}" in help_text
+    assert "{list,show,stats,changes,patch,files,tools,failures,compare,replay,html}" in help_text
+    assert "Tools are not executed and the model is not called." in " ".join(help_text.split())
     assert "unified diffs" in help_text
     assert "ok/fail counts" in help_text
     assert "failed tool calls and session error events" in help_text

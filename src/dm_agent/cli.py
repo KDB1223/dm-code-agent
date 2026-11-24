@@ -20,6 +20,7 @@ from dm_agent.present import (
     format_inspection,
     format_patch,
     format_stats,
+    format_tools,
     format_transcript,
     render_html,
 )
@@ -33,6 +34,7 @@ from dm_agent.session import (
     session_files,
     session_patch,
     session_stats,
+    session_tools,
     summarize_session,
 )
 from dm_agent.tools import build_registry
@@ -132,6 +134,18 @@ def build_parser() -> argparse.ArgumentParser:
     files.add_argument("session_id", help="Session id or a unique prefix.")
     files.add_argument("--json", action="store_true", help="Print the inventory as JSON.")
     files.set_defaults(handler=cmd_files)
+
+    tools = session_sub.add_parser(
+        "tools",
+        parents=[common],
+        help=(
+            "List tools called in the log, with ok/fail counts and recorded paths. "
+            "Tools are not executed and the model is not called."
+        ),
+    )
+    tools.add_argument("session_id", help="Session id or a unique prefix.")
+    tools.add_argument("--json", action="store_true", help="Print the inventory as JSON.")
+    tools.set_defaults(handler=cmd_tools)
 
     failures = session_sub.add_parser(
         "failures",
@@ -303,6 +317,18 @@ def cmd_files(args: argparse.Namespace) -> int:
         return 0
     print(f"file {path}")
     sys.stdout.write(format_files(payload))
+    return 0
+
+
+def cmd_tools(args: argparse.Namespace) -> int:
+    """Print tools recorded in the log. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    payload = session_tools(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_tools(payload))
     return 0
 
 

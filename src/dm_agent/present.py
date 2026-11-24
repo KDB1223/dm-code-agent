@@ -190,6 +190,50 @@ def format_files(payload: dict[str, Any]) -> str:
     return head + "\n" + "\n\n".join(blocks) + "\n"
 
 
+def format_tools(payload: dict[str, Any]) -> str:
+    """Text for ``sessions tools``. Field order is fixed.
+
+    Zero tools are two lines and a trailing newline, with no extra blank
+    line. Otherwise a blank line, then one block per tool in payload
+    order. Blocks are separated by one blank line, and a trailing newline
+    follows the last block. Each tool line is ``{tool} ok={ok} fail={fail}``.
+    Both counts are always printed. Each non-empty string path is indented
+    two spaces on the following lines, in payload order. A tool with no
+    paths has only that one line. A non-list ``tools`` value is empty. An
+    entry that is not a dict is skipped. The count is the number of blocks
+    printed. A non-string tool name is printed as empty. A bool or non-int
+    count is printed as 0. A non-list ``paths`` value adds no path lines.
+    A path that is not a non-empty string is skipped.
+    """
+    session_id = str(payload.get("session_id") or "(unknown)")
+    raw_tools = payload.get("tools")
+    tools = raw_tools if isinstance(raw_tools, list) else []
+    blocks: list[str] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        tool = item.get("tool", "")
+        if not isinstance(tool, str):
+            tool = ""
+        ok = item.get("ok", 0)
+        fail = item.get("fail", 0)
+        if isinstance(ok, bool) or not isinstance(ok, int):
+            ok = 0
+        if isinstance(fail, bool) or not isinstance(fail, int):
+            fail = 0
+        lines = [f"{tool} ok={ok} fail={fail}"]
+        raw_paths = item.get("paths")
+        paths = raw_paths if isinstance(raw_paths, list) else []
+        for path in paths:
+            if isinstance(path, str) and path != "":
+                lines.append(f"  {path}")
+        blocks.append("\n".join(lines))
+    head = f"session {session_id}\ntools {len(blocks)}\n"
+    if not blocks:
+        return head
+    return head + "\n" + "\n\n".join(blocks) + "\n"
+
+
 def _indented_body(text: str) -> str:
     """Indent each line by two spaces.
 
