@@ -11,6 +11,7 @@ from dm_agent.present import (
     format_inspection,
     format_patch,
     format_stats,
+    format_timing,
     format_tools,
     format_transcript,
     render_html,
@@ -25,6 +26,7 @@ from dm_agent.session import (
     session_files,
     session_patch,
     session_stats,
+    session_timing,
     session_tools,
     summarize_session,
 )
@@ -2142,3 +2144,661 @@ def test_session_compare_empty_events() -> None:
     )
     assert format_compare({}) == text
     assert "(0)" not in text
+
+
+def test_session_timing_realistic_log_and_format() -> None:
+    session_id = "20261108T100749Z-3c6c4a"
+    events = [
+        {
+            "ts": "2026-11-08T10:07:49.000Z",
+            "session_id": session_id,
+            "seq": 1,
+            "step": 0,
+            "kind": "session_start",
+            "task": "Fix add()",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.010Z",
+            "session_id": session_id,
+            "seq": 2,
+            "step": 0,
+            "kind": "user",
+            "content": "Fix add() in math_utils.py",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.100Z",
+            "seq": 3,
+            "step": 1,
+            "kind": "thought",
+            "content": "I will read math_utils.py",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.150Z",
+            "seq": 4,
+            "step": 1,
+            "kind": "tool_call",
+            "tool": "read_file",
+            "call_id": "call_1",
+            "arguments": {"path": "math_utils.py"},
+        },
+        {
+            "ts": "2026-11-08T10:07:49.400Z",
+            "seq": 5,
+            "step": 1,
+            "kind": "tool_result",
+            "tool": "read_file",
+            "call_id": "call_1",
+            "ok": True,
+            "output": "return a - b",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.500Z",
+            "seq": 6,
+            "step": 2,
+            "kind": "thought",
+            "content": "The body subtracts.",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.600Z",
+            "seq": 7,
+            "step": 2,
+            "kind": "tool_call",
+            "tool": "edit_file",
+            "call_id": "call_2",
+            "arguments": {"path": "math_utils.py", "old": "return a - b", "new": "return a + b"},
+        },
+        {
+            "ts": "2026-11-08T10:07:49.900Z",
+            "seq": 8,
+            "step": 2,
+            "kind": "tool_result",
+            "tool": "edit_file",
+            "call_id": "call_2",
+            "ok": True,
+            "output": "Updated math_utils.py",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.910Z",
+            "seq": 9,
+            "step": 2,
+            "kind": "tool_call",
+            "tool": "run_shell",
+            "call_id": "call_3",
+            "arguments": {"command": "python -m pytest -q"},
+        },
+        {
+            "ts": "2026-11-08T10:07:49.960Z",
+            "seq": 10,
+            "step": 2,
+            "kind": "tool_result",
+            "tool": "run_shell",
+            "call_id": "call_3",
+            "ok": True,
+            "output": "passed",
+        },
+        {
+            "ts": "2026-11-08T10:07:50.000Z",
+            "seq": 11,
+            "step": 3,
+            "kind": "final",
+            "content": "add() now returns the sum.",
+        },
+    ]
+    payload = session_timing(events)
+    assert list(payload) == [
+        "session_id",
+        "started",
+        "ended",
+        "duration_ms",
+        "unparsed_ts",
+        "steps",
+        "calls",
+    ]
+    assert payload == {
+        "session_id": session_id,
+        "started": "2026-11-08T10:07:49.000Z",
+        "ended": "2026-11-08T10:07:50.000Z",
+        "duration_ms": 1000,
+        "unparsed_ts": 0,
+        "steps": [
+            {
+                "step": 1,
+                "started": "2026-11-08T10:07:49.100Z",
+                "ended": "2026-11-08T10:07:49.400Z",
+                "duration_ms": 300,
+            },
+            {
+                "step": 2,
+                "started": "2026-11-08T10:07:49.500Z",
+                "ended": "2026-11-08T10:07:49.960Z",
+                "duration_ms": 460,
+            },
+            {
+                "step": 3,
+                "started": "2026-11-08T10:07:50.000Z",
+                "ended": "2026-11-08T10:07:50.000Z",
+                "duration_ms": 0,
+            },
+        ],
+        "calls": [
+            {
+                "step": 1,
+                "tool": "read_file",
+                "call_id": "call_1",
+                "started": "2026-11-08T10:07:49.150Z",
+                "ended": "2026-11-08T10:07:49.400Z",
+                "duration_ms": 250,
+            },
+            {
+                "step": 2,
+                "tool": "edit_file",
+                "call_id": "call_2",
+                "started": "2026-11-08T10:07:49.600Z",
+                "ended": "2026-11-08T10:07:49.900Z",
+                "duration_ms": 300,
+            },
+            {
+                "step": 2,
+                "tool": "run_shell",
+                "call_id": "call_3",
+                "started": "2026-11-08T10:07:49.910Z",
+                "ended": "2026-11-08T10:07:49.960Z",
+                "duration_ms": 50,
+            },
+        ],
+    }
+    for row in payload["steps"]:
+        assert list(row) == ["step", "started", "ended", "duration_ms"]
+    for row in payload["calls"]:
+        assert list(row) == ["step", "tool", "call_id", "started", "ended", "duration_ms"]
+    assert [row["step"] for row in payload["steps"]] == [1, 2, 3]
+    text = format_timing(payload)
+    assert text == format_timing(payload)
+    assert text == (
+        "session 20261108T100749Z-3c6c4a\n"
+        "started 2026-11-08T10:07:49.000Z\n"
+        "ended 2026-11-08T10:07:50.000Z\n"
+        "duration_ms 1000\n"
+        "unparsed_ts 0\n"
+        "steps\n"
+        "  1  2026-11-08T10:07:49.100Z  2026-11-08T10:07:49.400Z  300ms\n"
+        "  2  2026-11-08T10:07:49.500Z  2026-11-08T10:07:49.960Z  460ms\n"
+        "  3  2026-11-08T10:07:50.000Z  2026-11-08T10:07:50.000Z  0ms\n"
+        "calls\n"
+        "  1  read_file  call_1  250ms\n"
+        "  2  edit_file  call_2  300ms\n"
+        "  2  run_shell  call_3  50ms\n"
+    )
+
+
+def test_session_timing_unparsed_timestamps_do_not_move_the_ends() -> None:
+    events = [
+        {"ts": None, "kind": "session_start", "step": 0, "session_id": "s"},
+        {"kind": "user", "step": 0, "content": "no ts"},
+        {"ts": "", "kind": "thought", "step": 1},
+        {"ts": 123, "kind": "tool_call", "step": 1, "tool": "read_file", "call_id": "c1"},
+        {"ts": "not-a-time", "kind": "tool_result", "step": 1, "call_id": "c1", "ok": True},
+        {"ts": "2026-11-08T10:07:49.100Z", "kind": "thought", "step": 2},
+        {"ts": "   ", "kind": "final", "step": 2},
+        {"ts": ["2026-11-08T10:07:49.100Z"], "kind": "error", "step": 3},
+        {"ts": "2026-11-08T10:07:49.400Z", "kind": "max_steps", "step": 4},
+    ]
+    payload = session_timing(events, session_id="ignored")
+    assert payload["session_id"] == "s"
+    assert payload["started"] == "2026-11-08T10:07:49.100Z"
+    assert payload["ended"] == "2026-11-08T10:07:49.400Z"
+    assert payload["duration_ms"] == 300
+    assert payload["unparsed_ts"] == 7
+    assert payload["steps"] == [
+        {"step": 1, "started": "", "ended": "", "duration_ms": 0},
+        {
+            "step": 2,
+            "started": "2026-11-08T10:07:49.100Z",
+            "ended": "2026-11-08T10:07:49.100Z",
+            "duration_ms": 0,
+        },
+        {"step": 3, "started": "", "ended": "", "duration_ms": 0},
+        {
+            "step": 4,
+            "started": "2026-11-08T10:07:49.400Z",
+            "ended": "2026-11-08T10:07:49.400Z",
+            "duration_ms": 0,
+        },
+    ]
+    assert payload["calls"] == [
+        {
+            "step": 1,
+            "tool": "read_file",
+            "call_id": "c1",
+            "started": "",
+            "ended": "",
+            "duration_ms": None,
+        }
+    ]
+    text = format_timing(payload)
+    assert "unparsed_ts 7\n" in text
+    assert "  1  (none)  (none)  0ms\n" in text
+    assert "  1  read_file  c1  unknown\n" in text
+
+
+def test_session_timing_inverted_spans_are_zero() -> None:
+    events = [
+        {"ts": "2026-11-08T10:07:49.500Z", "session_id": "s", "kind": "thought", "step": 2},
+        {
+            "ts": "2026-11-08T10:07:49.100Z",
+            "kind": "tool_call",
+            "step": 2,
+            "tool": "read_file",
+            "call_id": "c",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.050Z",
+            "kind": "tool_result",
+            "step": 2,
+            "call_id": "c",
+            "ok": True,
+        },
+        {"ts": "2026-11-08T10:07:49.400Z", "kind": "thought", "step": 1},
+    ]
+    payload = session_timing(events)
+    assert payload["started"] == "2026-11-08T10:07:49.500Z"
+    assert payload["ended"] == "2026-11-08T10:07:49.400Z"
+    assert payload["duration_ms"] == 0
+    assert payload["unparsed_ts"] == 0
+    assert [row["step"] for row in payload["steps"]] == [2, 1]
+    assert payload["steps"][0]["duration_ms"] == 0
+    assert payload["steps"][0]["started"] == "2026-11-08T10:07:49.500Z"
+    assert payload["steps"][0]["ended"] == "2026-11-08T10:07:49.050Z"
+    assert payload["steps"][1]["duration_ms"] == 0
+    assert payload["calls"] == [
+        {
+            "step": 2,
+            "tool": "read_file",
+            "call_id": "c",
+            "started": "2026-11-08T10:07:49.100Z",
+            "ended": "2026-11-08T10:07:49.050Z",
+            "duration_ms": 0,
+        }
+    ]
+    assert "  2  read_file  c  0ms\n" in format_timing(payload)
+    assert "unknown" not in format_timing(payload)
+
+
+def test_session_timing_pairs_calls_and_skips_non_steps() -> None:
+    events = [
+        {
+            "ts": "2026-11-08T10:00:00.000Z",
+            "session_id": "s",
+            "kind": "session_start",
+            "step": 0,
+        },
+        {"ts": "2026-11-08T10:00:00.010Z", "kind": "user", "step": 0, "content": "hi"},
+        {
+            "ts": "2026-11-08T10:00:00.020Z",
+            "kind": "tool_call",
+            "step": 0,
+            "tool": "read_file",
+            "call_id": "c-zero",
+            "arguments": {"path": "a.py"},
+        },
+        {
+            "ts": "2026-11-08T10:00:00.040Z",
+            "kind": "tool_result",
+            "step": 0,
+            "call_id": "c-zero",
+            "ok": True,
+            "output": "ok",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.100Z",
+            "kind": "tool_call",
+            "step": 4,
+            "tool": "edit_file",
+            "call_id": "c-open",
+            "arguments": {"path": "a.py", "old": "a", "new": "b"},
+        },
+        {
+            "ts": "2026-11-08T10:00:00.110Z",
+            "kind": "tool_call",
+            "step": 4,
+            "tool": "write_file",
+            "arguments": {"path": "b.py", "content": "x"},
+        },
+        {
+            "ts": "2026-11-08T10:00:00.120Z",
+            "kind": "tool_call",
+            "step": 1,
+            "tool": "run_shell",
+            "call_id": "",
+            "arguments": {"command": "pwd"},
+        },
+        {
+            "ts": "2026-11-08T10:00:00.130Z",
+            "kind": "tool_result",
+            "step": 1,
+            "call_id": "",
+            "ok": True,
+            "output": "nope",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.140Z",
+            "kind": "tool_call",
+            "step": 1,
+            "tool": "search",
+            "call_id": 7,
+            "arguments": {"query": "x"},
+        },
+        {"ts": "2026-11-08T10:00:00.150Z", "kind": "tool_result", "step": 1, "call_id": 7, "ok": True},
+        {
+            "ts": "2026-11-08T10:00:00.200Z",
+            "kind": "tool_call",
+            "step": 2,
+            "tool": "lint_python",
+            "call_id": "c-flip",
+            "arguments": {"path": "a.py"},
+        },
+        {
+            "ts": "2026-11-08T10:00:00.210Z",
+            "kind": "tool_result",
+            "step": 2,
+            "call_id": "c-flip",
+            "ok": False,
+            "output": "first",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.250Z",
+            "kind": "tool_result",
+            "step": 2,
+            "call_id": "c-flip",
+            "ok": True,
+            "output": "second",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.220Z",
+            "kind": "tool_call",
+            "step": 2,
+            "tool": "lint_python",
+            "call_id": "c-flip",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.300Z",
+            "kind": "tool_result",
+            "step": 3,
+            "tool": "read_file",
+            "call_id": "c-ghost",
+            "ok": True,
+            "output": "ghost",
+        },
+        {"ts": "2026-11-08T10:00:00.310Z", "kind": "thought", "step": True},
+        {"ts": "2026-11-08T10:00:00.320Z", "kind": "thought", "step": "1"},
+        {"ts": "2026-11-08T10:00:00.330Z", "kind": "thought", "step": 1.5},
+        {"ts": "2026-11-08T10:00:00.340Z", "kind": "thought", "step": -1},
+        {"ts": "2026-11-08T10:00:00.345Z", "kind": "thought", "step": False},
+        {"ts": "2026-11-08T10:00:00.350Z", "kind": "tool_call", "step": 5, "call_id": "c-noname"},
+        {
+            "ts": "2026-11-08T10:00:00.360Z",
+            "kind": "tool_result",
+            "step": 5,
+            "call_id": "c-noname",
+            "ok": True,
+        },
+        {
+            "ts": "2026-11-08T10:00:00.370Z",
+            "kind": "tool_call",
+            "step": False,
+            "tool": "",
+            "call_id": "c-blank",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.380Z",
+            "kind": "tool_call",
+            "step": -2,
+            "tool": 3,
+            "call_id": "c-badtool",
+        },
+        {"ts": "2026-11-08T10:00:00.900Z", "kind": "user", "step": 4, "content": "still user"},
+        {"ts": "2026-11-08T10:00:01.000Z", "kind": "session_start", "step": 9},
+        {
+            "ts": "2026-11-08T10:00:00.400Z",
+            "kind": "tool_call",
+            "step": 6,
+            "tool": "read_file",
+            "call_id": "c-badend",
+        },
+        {
+            "ts": "2026-11-08T10:00:00.410Z",
+            "kind": "tool_result",
+            "step": 6,
+            "call_id": "c-badend",
+            "ok": True,
+        },
+        {"ts": "nope", "kind": "tool_result", "step": 6, "call_id": "c-badend", "ok": False},
+    ]
+    payload = session_timing(events)
+    assert payload["started"] == "2026-11-08T10:00:00.000Z"
+    assert payload["ended"] == "2026-11-08T10:00:00.410Z"
+    assert payload["duration_ms"] == 410
+    assert payload["unparsed_ts"] == 1
+    assert [row["step"] for row in payload["steps"]] == [4, 1, 2, 3, 5, 6]
+    assert payload["steps"][0] == {
+        "step": 4,
+        "started": "2026-11-08T10:00:00.100Z",
+        "ended": "2026-11-08T10:00:00.110Z",
+        "duration_ms": 10,
+    }
+    assert payload["steps"][2]["duration_ms"] == 20
+    assert payload["calls"] == [
+        {
+            "step": None,
+            "tool": "read_file",
+            "call_id": "c-zero",
+            "started": "2026-11-08T10:00:00.020Z",
+            "ended": "2026-11-08T10:00:00.040Z",
+            "duration_ms": 20,
+        },
+        {
+            "step": 4,
+            "tool": "edit_file",
+            "call_id": "c-open",
+            "started": "2026-11-08T10:00:00.100Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+        {
+            "step": 4,
+            "tool": "write_file",
+            "call_id": "",
+            "started": "2026-11-08T10:00:00.110Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+        {
+            "step": 1,
+            "tool": "run_shell",
+            "call_id": "",
+            "started": "2026-11-08T10:00:00.120Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+        {
+            "step": 1,
+            "tool": "search",
+            "call_id": "",
+            "started": "2026-11-08T10:00:00.140Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+        {
+            "step": 2,
+            "tool": "lint_python",
+            "call_id": "c-flip",
+            "started": "2026-11-08T10:00:00.200Z",
+            "ended": "2026-11-08T10:00:00.250Z",
+            "duration_ms": 50,
+        },
+        {
+            "step": 2,
+            "tool": "lint_python",
+            "call_id": "c-flip",
+            "started": "2026-11-08T10:00:00.220Z",
+            "ended": "2026-11-08T10:00:00.250Z",
+            "duration_ms": 30,
+        },
+        {
+            "step": 5,
+            "tool": "",
+            "call_id": "c-noname",
+            "started": "2026-11-08T10:00:00.350Z",
+            "ended": "2026-11-08T10:00:00.360Z",
+            "duration_ms": 10,
+        },
+        {
+            "step": None,
+            "tool": "",
+            "call_id": "c-blank",
+            "started": "2026-11-08T10:00:00.370Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+        {
+            "step": None,
+            "tool": "",
+            "call_id": "c-badtool",
+            "started": "2026-11-08T10:00:00.380Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+        {
+            "step": 6,
+            "tool": "read_file",
+            "call_id": "c-badend",
+            "started": "2026-11-08T10:00:00.400Z",
+            "ended": "",
+            "duration_ms": None,
+        },
+    ]
+    assert all(row["call_id"] != "c-ghost" for row in payload["calls"])
+    assert 0 not in [row["step"] for row in payload["steps"]]
+    assert 9 not in [row["step"] for row in payload["steps"]]
+    text = format_timing(payload)
+    assert text == format_timing(payload)
+    assert (
+        "steps\n"
+        "  4  2026-11-08T10:00:00.100Z  2026-11-08T10:00:00.110Z  10ms\n"
+        "  1  "
+    ) in text
+    assert "  -  read_file  c-zero  20ms\n" in text
+    assert "  4  edit_file  c-open  unknown\n" in text
+    assert "  4  write_file  (none)  unknown\n" in text
+    assert "  2  lint_python  c-flip  50ms\n" in text
+    assert "  5  (unknown)  c-noname  10ms\n" in text
+    assert "c-ghost" not in text
+
+
+def test_session_timing_empty_events() -> None:
+    assert session_timing([]) == {
+        "session_id": "",
+        "started": "",
+        "ended": "",
+        "duration_ms": 0,
+        "unparsed_ts": 0,
+        "steps": [],
+        "calls": [],
+    }
+    assert list(session_timing([])) == [
+        "session_id",
+        "started",
+        "ended",
+        "duration_ms",
+        "unparsed_ts",
+        "steps",
+        "calls",
+    ]
+    fallback = session_timing([], session_id="from-stem")
+    assert fallback["session_id"] == "from-stem"
+    assert fallback["duration_ms"] == 0
+    assert format_timing(session_timing([])) == (
+        "session (unknown)\n"
+        "started (none)\n"
+        "ended (none)\n"
+        "duration_ms 0\n"
+        "unparsed_ts 0\n"
+        "steps (none)\n"
+        "calls (none)\n"
+    )
+    logged = session_timing(
+        [
+            {"session_id": "", "kind": "user", "step": 0},
+            {"session_id": "later", "kind": "final", "step": 1},
+        ],
+        session_id="from-stem",
+    )
+    assert logged["session_id"] == "later"
+    assert logged["unparsed_ts"] == 2
+    assert logged["started"] == ""
+    assert logged["ended"] == ""
+    assert logged["duration_ms"] == 0
+    assert logged["steps"] == [{"step": 1, "started": "", "ended": "", "duration_ms": 0}]
+    assert logged["calls"] == []
+    assert format_timing(logged) == (
+        "session later\n"
+        "started (none)\n"
+        "ended (none)\n"
+        "duration_ms 0\n"
+        "unparsed_ts 2\n"
+        "steps\n"
+        "  1  (none)  (none)  0ms\n"
+        "calls (none)\n"
+    )
+
+
+def test_session_timing_parses_offset_timestamps() -> None:
+    events = [
+        {
+            "ts": "2026-11-08T10:07:49.237+00:00",
+            "session_id": "off",
+            "kind": "session_start",
+            "step": 0,
+        },
+        {"ts": "2026-11-08T10:07:49.237Z", "kind": "user", "step": 0, "content": "same instant"},
+        {"ts": "2026-11-08T10:07:49.237100Z", "kind": "thought", "step": 2},
+        {"ts": "2026-11-08T10:07:49.237900Z", "kind": "final", "step": 2},
+        {
+            "ts": "2026-11-08T15:37:49.300+05:30",
+            "kind": "tool_call",
+            "step": 1,
+            "tool": "read_file",
+            "call_id": "c",
+            "arguments": {"path": "a.py"},
+        },
+        {
+            "ts": "2026-11-08T10:07:49.450Z",
+            "kind": "tool_result",
+            "step": 1,
+            "call_id": "c",
+            "ok": True,
+        },
+    ]
+    payload = session_timing(events)
+    assert payload["unparsed_ts"] == 0
+    assert payload["started"] == "2026-11-08T10:07:49.237+00:00"
+    assert payload["ended"] == "2026-11-08T10:07:49.450Z"
+    assert payload["duration_ms"] == 213
+    assert [row["step"] for row in payload["steps"]] == [2, 1]
+    assert payload["steps"][0]["duration_ms"] == 0
+    assert payload["steps"][0]["started"] == "2026-11-08T10:07:49.237100Z"
+    assert payload["steps"][0]["ended"] == "2026-11-08T10:07:49.237900Z"
+    assert payload["calls"] == [
+        {
+            "step": 1,
+            "tool": "read_file",
+            "call_id": "c",
+            "started": "2026-11-08T15:37:49.300+05:30",
+            "ended": "2026-11-08T10:07:49.450Z",
+            "duration_ms": 150,
+        }
+    ]
+    text = format_timing(payload)
+    assert "2026-11-08T10:07:49.237+00:00" in text
+    assert "2026-11-08T15:37:49.300+05:30" in text
+    assert "  1  read_file  c  150ms\n" in text

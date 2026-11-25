@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +157,43 @@ def _event_step(event: dict[str, Any]) -> int | None:
     return None
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp, or None when it is missing or invalid.
+
+    ``utc_now`` writes a trailing ``Z``. That suffix is rewritten to
+    ``+00:00`` so ``datetime.fromisoformat`` can parse it. A numeric
+    offset such as ``+00:00`` is accepted as written. A non-string, an
+    empty string, and any value ``fromisoformat`` rejects are missing.
+    The original text is not rewritten for display.
+    """
+    if not isinstance(value, str) or value == "":
+        return None
+    text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _duration_ms(start: datetime | None, end: datetime | None) -> int:
+    """Non-negative whole milliseconds from ``start`` to ``end``.
+
+    Missing ends are 0. An end earlier than the start is 0, not a
+    negative count. The value is the timedelta floored toward zero at
+    millisecond resolution, so a fraction of a millisecond does not
+    round up. A pair that cannot be subtracted is 0.
+    """
+    if start is None or end is None:
+        return 0
+    try:
+        delta = end - start
+    except TypeError:
+        return 0
+    if delta < timedelta(0):
+        return 0
+    return delta // timedelta(milliseconds=1)
+
+
 def session_stats(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
     """Summarize turns, tool counts, edited files, and a clean ending.
 
@@ -217,6 +254,138 @@ def session_stats(events: list[dict[str, Any]], *, session_id: str = "") -> dict
         "ended_cleanly": last_terminal == "final",
         "tools": {name: tool_counts[name] for name in sorted(tool_counts)},
         "files": files,
+    }
+
+
+def session_timing(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """Reconstruct wall-clock timing from timestamps already in the log.
+
+    This reads ``events`` only. It does not call a model, execute tools,
+    or inspect a workspace. Every event is considered for the session
+    ``started``, ``ended``, ``duration_ms``, and ``unparsed_ts``. A ``ts``
+    is parsed when ``_parse_ts`` accepts it. Other values increment
+    ``unparsed_ts`` and do not move either end. A valid timestamp still
+    counts when the event has no step and is not a tool call.
+
+    ``started`` and ``ended`` are the original timestamp strings of the
+    first and last events with a parseable ``ts``, in log order. They
+    are not rewritten. ``duration_ms`` is ``_duration_ms`` of those
+    instants: an integer, 0 when either end is missing, and 0 when
+    ``ended`` is earlier than ``started``.
+
+    A step row uses the same definition as ``session_stats``: ``kind``
+    is in ``_TURN_KINDS`` and ``_event_step`` is an integer >= 1. Bools
+    and other types are not a step. ``session_start``, ``user``, and
+    step 0 do not create a row, but a parseable ``ts`` on those events
+    still counts toward the session span and toward ``unparsed_ts``.
+    Rows stay in first-seen order. ``started`` and ``ended`` on a row
+    are the first and last parseable timestamps among events that
+    belong to that step. A step whose events have no parseable ``ts``
+    is still listed, with empty ends and duration 0.
+
+    One call row is emitted per ``tool_call``, in log order, including
+    a call with no path, no tool name, or no ``call_id``. A
+    ``tool_result`` pairs when its ``call_id`` is a non-empty string.
+    The last result in the log with that id supplies ``ended``, which
+    is how a later result replaces an earlier one. A call whose
+    ``call_id`` is missing, empty, or not a string stays unpaired.
+    A result with no matching call does not invent a row. ``step`` is
+    the call's integer step when it is >= 1, and null otherwise.
+    ``tool`` and ``call_id`` are kept when they are non-empty strings,
+    and are ``""`` otherwise. ``duration_ms`` is an int when both ends
+    parse, 0 when the result is earlier than the call, and null when
+    either end is missing or unparsed. 0 is a computed duration, not a
+    stand-in for unknown. This is timing only. It does not report ok
+    or failure.
+    """
+    started = ""
+    ended = ""
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    unparsed_ts = 0
+    steps: list[dict[str, Any]] = []
+    step_rows: dict[int, dict[str, Any]] = {}
+    step_times: dict[int, tuple[datetime | None, datetime | None]] = {}
+    last_result: dict[str, dict[str, Any]] = {}
+    tool_calls: list[dict[str, Any]] = []
+
+    for event in events:
+        raw_ts = event.get("ts")
+        parsed = _parse_ts(raw_ts)
+        if parsed is None:
+            unparsed_ts += 1
+        else:
+            if started_at is None:
+                started_at = parsed
+                started = raw_ts
+            ended_at = parsed
+            ended = raw_ts
+
+        kind = event.get("kind")
+        if kind == "tool_result":
+            call_id = event.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                last_result[call_id] = event
+        elif kind == "tool_call":
+            tool_calls.append(event)
+
+        step = _event_step(event)
+        if kind in _TURN_KINDS and step is not None and step >= 1:
+            row = step_rows.get(step)
+            if row is None:
+                row = {"step": step, "started": "", "ended": "", "duration_ms": 0}
+                step_rows[step] = row
+                step_times[step] = (None, None)
+                steps.append(row)
+            if parsed is not None:
+                start_at, _previous_end = step_times[step]
+                if start_at is None:
+                    start_at = parsed
+                    row["started"] = raw_ts
+                step_times[step] = (start_at, parsed)
+                row["ended"] = raw_ts
+
+    for row in steps:
+        start_at, end_at = step_times[row["step"]]
+        row["duration_ms"] = _duration_ms(start_at, end_at)
+
+    calls: list[dict[str, Any]] = []
+    for event in tool_calls:
+        step = _event_step(event)
+        tool = event.get("tool")
+        raw_call_id = event.get("call_id")
+        call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id else ""
+        start_parsed = _parse_ts(event.get("ts"))
+        end_parsed: datetime | None = None
+        ended_ts = ""
+        if call_id and call_id in last_result:
+            result = last_result[call_id]
+            end_parsed = _parse_ts(result.get("ts"))
+            if end_parsed is not None:
+                ended_ts = result["ts"]
+        if start_parsed is not None and end_parsed is not None:
+            duration: int | None = _duration_ms(start_parsed, end_parsed)
+        else:
+            duration = None
+        calls.append(
+            {
+                "step": step if step is not None and step >= 1 else None,
+                "tool": tool if isinstance(tool, str) and tool else "",
+                "call_id": call_id,
+                "started": event["ts"] if start_parsed is not None else "",
+                "ended": ended_ts,
+                "duration_ms": duration,
+            }
+        )
+
+    return {
+        "session_id": _first_session_id(events, session_id),
+        "started": started,
+        "ended": ended,
+        "duration_ms": _duration_ms(started_at, ended_at),
+        "unparsed_ts": unparsed_ts,
+        "steps": steps,
+        "calls": calls,
     }
 
 
