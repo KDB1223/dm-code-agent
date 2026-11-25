@@ -12,6 +12,7 @@ from dm_agent.present import (
     format_failures,
     format_files,
     format_patch,
+    format_timing,
     format_tools,
 )
 from dm_agent.session import (
@@ -22,6 +23,7 @@ from dm_agent.session import (
     session_failures,
     session_files,
     session_patch,
+    session_timing,
     session_tools,
     summarize_session,
 )
@@ -640,12 +642,192 @@ def test_sessions_help_lists_failures(capsys) -> None:
         main(["sessions", "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{list,show,stats,changes,patch,files,tools,failures,compare,replay,html}" in help_text
+    assert "{list,show,stats,changes,patch,files,tools,failures,timing,compare,replay,html}" in help_text
     assert "Tools are not executed and the model is not called." in " ".join(help_text.split())
     assert "unified diffs" in help_text
     assert "ok/fail counts" in help_text
     assert "failed tool calls and session error events" in help_text
     assert "Compare two recorded session logs" in help_text
+    assert "timestamps already in the log" in " ".join(help_text.split())
+
+
+def test_sessions_help_lists_timing(capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["sessions", "--help"])
+    assert caught.value.code == 0
+    assert "timing" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as bare:
+        main(["sessions"])
+    assert bare.value.code == 0
+    assert "timing" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as choice:
+        main(["sessions", "help"])
+    assert choice.value.code == 2
+    assert "timing" in capsys.readouterr().err
+
+
+def test_timing_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log_dir = tmp_path / ".dm-agent" / "sessions"
+    log_dir.mkdir(parents=True)
+    session_id = "20261108T100749Z-timing"
+    events = [
+        {
+            "ts": "2026-11-08T10:07:49.000Z",
+            "session_id": session_id,
+            "seq": 1,
+            "step": 0,
+            "kind": "session_start",
+            "task": "audit",
+        },
+        {
+            "ts": "2026-11-08T10:07:49.100Z",
+            "session_id": session_id,
+            "seq": 2,
+            "step": 1,
+            "kind": "tool_call",
+            "tool": "read_file",
+            "call_id": "c-你好",
+            "arguments": {"path": "a.py"},
+        },
+        {
+            "ts": "2026-11-08T10:07:49.250Z",
+            "session_id": session_id,
+            "seq": 3,
+            "step": 1,
+            "kind": "tool_result",
+            "tool": "read_file",
+            "call_id": "c-你好",
+            "ok": True,
+            "output": "ok",
+        },
+        {
+            "ts": None,
+            "session_id": session_id,
+            "seq": 4,
+            "step": 2,
+            "kind": "tool_call",
+            "tool": "run_shell",
+            "call_id": "c-open",
+            "arguments": {"command": "pwd"},
+        },
+        {
+            "ts": "2026-11-08T10:07:49.400Z",
+            "session_id": session_id,
+            "seq": 5,
+            "step": 3,
+            "kind": "final",
+            "content": "done",
+        },
+    ]
+    path = log_dir / f"{session_id}.jsonl"
+    path.write_text(
+        "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("timing must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+    monkeypatch.setattr("dm_agent.cli.Agent", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("timing must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    assert main(["sessions", "timing", session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "timing", session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    expected = session_timing(load_events(path), session_id=session_id)
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    payload = json.loads(first)
+    assert payload["session_id"] == session_id
+    assert payload["duration_ms"] == 400
+    assert payload["unparsed_ts"] == 1
+    assert payload["calls"][0]["call_id"] == "c-你好"
+    assert payload["calls"][0]["duration_ms"] == 150
+    assert payload["calls"][1]["duration_ms"] is None
+    assert "你好" in first
+    assert "\\u" not in first
+    assert "null" in first
+    assert not (tmp_path / "a.py").exists()
+
+    assert main(["sessions", "timing", session_id, "--workspace", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert text == f"file {path}\n" + format_timing(expected)
+    assert "unknown" in text
+    assert "150ms" in text
+
+    empty = log_dir / "20261108T100800Z-empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert main(["sessions", "timing", empty.stem, "--workspace", str(tmp_path), "--json"]) == 0
+    empty_payload = json.loads(capsys.readouterr().out)
+    assert empty_payload["session_id"] == empty.stem
+    assert empty_payload["duration_ms"] == 0
+    assert empty_payload["steps"] == []
+    assert empty_payload["calls"] == []
+
+
+def test_timing_errors_match_sibling_commands(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+
+    assert main(["sessions", "timing", "missing", "--workspace", str(tmp_path)]) == 1
+    timing_err = capsys.readouterr().err
+    assert main(["sessions", "stats", "missing", "--workspace", str(tmp_path)]) == 1
+    assert timing_err == capsys.readouterr().err
+    assert timing_err == "error: session not found: missing\n"
+
+    log_dir = tmp_path / ".dm-agent" / "sessions"
+    log_dir.mkdir(parents=True)
+    for suffix in ("aaa111", "aaa222"):
+        path = log_dir / f"20260101T000000Z-{suffix}.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-01-01T00:00:00.000Z",
+                    "session_id": path.stem,
+                    "seq": 1,
+                    "step": 0,
+                    "kind": "session_start",
+                    "task": suffix,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    assert main(["sessions", "timing", "20260101T000000Z-aaa", "--workspace", str(tmp_path)]) == 1
+    timing_err = capsys.readouterr().err
+    assert main(["sessions", "show", "20260101T000000Z-aaa", "--workspace", str(tmp_path)]) == 1
+    assert timing_err == capsys.readouterr().err
+    assert "ambiguous" in timing_err
+
+    assert main(["sessions", "timing", "bad/id", "--workspace", str(tmp_path)]) == 1
+    timing_err = capsys.readouterr().err
+    assert main(["sessions", "stats", "bad/id", "--workspace", str(tmp_path)]) == 1
+    assert timing_err == capsys.readouterr().err
+    assert "invalid session id" in timing_err
+
+    assert main(["sessions", "timing", ".hidden", "--workspace", str(tmp_path)]) == 1
+    timing_err = capsys.readouterr().err
+    assert main(["sessions", "files", ".hidden", "--workspace", str(tmp_path)]) == 1
+    assert timing_err == capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as timing_exit:
+        main(["sessions", "timing", "--workspace", str(tmp_path)])
+    timing_err = capsys.readouterr().err
+    with pytest.raises(SystemExit) as stats_exit:
+        main(["sessions", "stats", "--workspace", str(tmp_path)])
+    stats_err = capsys.readouterr().err
+    assert timing_exit.value.code == stats_exit.value.code == 2
+    assert timing_err.strip().splitlines()[-1].replace("timing", "stats") == stats_err.strip().splitlines()[-1]
+    assert "the following arguments are required: session_id" in timing_err
+    assert "the following arguments are required: session_id" in stats_err
 
 
 def test_replay_does_not_build_tools(monkeypatch, tmp_path: Path, capsys) -> None:

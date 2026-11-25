@@ -78,6 +78,7 @@ dm-agent sessions patch <id> --workspace examples/demo_workspace
 dm-agent sessions files <id> --workspace examples/demo_workspace
 dm-agent sessions tools <id> --workspace examples/demo_workspace
 dm-agent sessions failures <id> --workspace examples/demo_workspace
+dm-agent sessions timing <id> --workspace examples/demo_workspace
 dm-agent sessions compare <id-a> <id-b> --workspace examples/demo_workspace
 dm-agent sessions replay <id> --workspace examples/demo_workspace
 ```
@@ -109,6 +110,8 @@ examples/demo_workspace/.dm-agent/sessions/<id>.jsonl
 `dm-agent sessions tools` 只读同一份 JSONL，按工具名汇总调用：成功次数、失败次数，以及记下的路径。没有记下路径的工具（例如 `run_shell`）也会计入。失败包括结果不是成功、没有配对结果，以及没有 `call_id` 的调用。路径按日志原文保留。它不是当前工作区的目录列表，也不重新执行工具，不需要 API key。
 
 `dm-agent sessions failures` 只读同一份 JSONL，按日志顺序列出失败的工具调用和会话 `error` 事件。结果不是成功的调用、没有配对结果的调用、以及没有记下路径的调用（例如 `run_shell`）都会列出，并带上 step、call id 和记下的输出。它不是当前工作区的目录列表，也不重新执行工具，不需要 API key。
+
+`dm-agent sessions timing` 只读同一份 JSONL，用日志里已有的 `ts` 计算会话、每个 step、以及每次工具调用的毫秒耗时。step 的定义与 `stats` 相同。调用与最后一个相同 `call_id` 的 `tool_result` 配对。结束早于开始时耗时为 0；没有可解析的结束时间时显示未知，而不是 0。它不判断成功或失败，也不是另一份失败清单。不需要 API key，也不会调用模型、重新执行工具或对照工作区。空日志和未配对的调用仍然成功退出。
 
 `dm-agent sessions compare` 只读两份已有 JSONL，比较基线会话和候选会话。差值是候选减去基线：回合数、失败条数（与 `failures` 列出的条数相同）、各工具的调用次数，以及成功 `edit_file` / `write_file` 记下的路径。路径按日志原文比较。它不是当前工作区的 diff，也不是模型质量分。不需要 API key，也不会重新执行工具。两边不同时命令仍然成功退出。
 

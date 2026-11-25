@@ -449,6 +449,100 @@ def format_compare(payload: dict[str, Any]) -> str:
     return body + "\n"
 
 
+def _timing_label(value: Any, *, empty: str) -> str:
+    """Non-empty string, or ``empty`` when the field is missing."""
+    if isinstance(value, str) and value:
+        return value
+    return empty
+
+
+def _timing_count(value: Any) -> int:
+    """Integer count. Bools and other types are 0."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
+def _timing_step_label(step: Any) -> str:
+    """Call step, or ``-`` when the log did not record an integer step >= 1."""
+    if isinstance(step, bool) or not isinstance(step, int):
+        return "-"
+    return str(step)
+
+
+def _timing_call_duration(duration: Any) -> str:
+    """``{n}ms`` for a computed duration. Null and other types are unknown."""
+    if isinstance(duration, bool) or not isinstance(duration, int):
+        return "unknown"
+    return f"{duration}ms"
+
+
+def _format_timing_steps(raw: Any) -> str:
+    rows = raw if isinstance(raw, list) else []
+    rendered: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        step = item.get("step")
+        step_text = str(step) if isinstance(step, int) and not isinstance(step, bool) else "-"
+        rendered.append(
+            f"  {step_text}  {_timing_label(item.get('started'), empty='(none)')}  "
+            f"{_timing_label(item.get('ended'), empty='(none)')}  "
+            f"{_timing_count(item.get('duration_ms', 0))}ms"
+        )
+    if not rendered:
+        return "steps (none)"
+    return "steps\n" + "\n".join(rendered)
+
+
+def _format_timing_calls(raw: Any) -> str:
+    rows = raw if isinstance(raw, list) else []
+    rendered: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        rendered.append(
+            f"  {_timing_step_label(item.get('step'))}  "
+            f"{_timing_label(item.get('tool'), empty='(unknown)')}  "
+            f"{_timing_label(item.get('call_id'), empty='(none)')}  "
+            f"{_timing_call_duration(item.get('duration_ms'))}"
+        )
+    if not rendered:
+        return "calls (none)"
+    return "calls\n" + "\n".join(rendered)
+
+
+def format_timing(payload: dict[str, Any]) -> str:
+    """Text for ``sessions timing``. Field order is fixed.
+
+    A missing session id is ``(unknown)``. A missing start or end is
+    ``(none)``. Counts are always printed, including zero. Timestamps
+    are the log strings, not a rewritten clock.
+
+    When ``steps`` is empty the section is one line, ``steps (none)``.
+    Otherwise a ``steps`` header is followed by one indented row per
+    step: step, start, end, and duration in milliseconds. ``calls``
+    uses the same shape. A call row prints ``-`` when the step is
+    missing, ``(unknown)`` when the tool name is empty, and ``(none)``
+    when the call id is empty. An integer duration is ``{n}ms``. A
+    null duration is ``unknown``. 0 is printed as ``0ms``. A non-list
+    section is empty. An entry that is not a dict is skipped. The
+    result ends with one trailing newline.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    lines = [
+        f"session {_timing_label(payload.get('session_id'), empty='(unknown)')}",
+        f"started {_timing_label(payload.get('started'), empty='(none)')}",
+        f"ended {_timing_label(payload.get('ended'), empty='(none)')}",
+        f"duration_ms {_timing_count(payload.get('duration_ms', 0))}",
+        f"unparsed_ts {_timing_count(payload.get('unparsed_ts', 0))}",
+        _format_timing_steps(payload.get("steps")),
+        _format_timing_calls(payload.get("calls")),
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def format_stats(stats: dict[str, Any]) -> str:
     """Compact text for ``sessions stats``. Field order is fixed."""
     tools = stats.get("tools") or {}

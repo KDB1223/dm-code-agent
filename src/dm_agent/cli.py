@@ -20,6 +20,7 @@ from dm_agent.present import (
     format_inspection,
     format_patch,
     format_stats,
+    format_timing,
     format_tools,
     format_transcript,
     render_html,
@@ -34,6 +35,7 @@ from dm_agent.session import (
     session_files,
     session_patch,
     session_stats,
+    session_timing,
     session_tools,
     summarize_session,
 )
@@ -155,6 +157,18 @@ def build_parser() -> argparse.ArgumentParser:
     failures.add_argument("session_id", help="Session id or a unique prefix.")
     failures.add_argument("--json", action="store_true", help="Print the failures as JSON.")
     failures.set_defaults(handler=cmd_failures)
+
+    timing = session_sub.add_parser(
+        "timing",
+        parents=[common],
+        help=(
+            "Report wall-clock timing from timestamps already in the log. "
+            "Tools are not executed and the model is not called."
+        ),
+    )
+    timing.add_argument("session_id", help="Session id or a unique prefix.")
+    timing.add_argument("--json", action="store_true", help="Print the timing as JSON.")
+    timing.set_defaults(handler=cmd_timing)
 
     compare = session_sub.add_parser(
         "compare",
@@ -341,6 +355,18 @@ def cmd_failures(args: argparse.Namespace) -> int:
         return 0
     print(f"file {path}")
     sys.stdout.write(format_failures(payload))
+    return 0
+
+
+def cmd_timing(args: argparse.Namespace) -> int:
+    """Print timing reconstructed from the log. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    payload = session_timing(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_timing(payload))
     return 0
 
 
