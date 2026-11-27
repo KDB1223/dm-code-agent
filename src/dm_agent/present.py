@@ -306,6 +306,137 @@ def format_failures(payload: dict[str, Any]) -> str:
     return head + "\n" + "\n\n".join(blocks) + "\n"
 
 
+_SHELL_OUTPUT_PREVIEW = 120
+
+
+def _shell_count(value: Any) -> int:
+    """Integer count from a shell payload. Bools and other types are 0."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
+def _shell_step(step: Any) -> str:
+    """Integer step, or ``?`` when the log did not record one."""
+    if isinstance(step, bool) or not isinstance(step, int):
+        return "?"
+    return str(step)
+
+
+def _shell_call_id(call_id: Any) -> str:
+    """Non-empty call id, or ``(none)`` when the field is null."""
+    if isinstance(call_id, str) and call_id:
+        return call_id
+    return "(none)"
+
+
+def _shell_timeout(timeout: Any) -> str | None:
+    """Decimal text for a logged number. Bools and other types are omitted."""
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return None
+    return str(timeout)
+
+
+def _shell_output_preview(output: str) -> str:
+    """One line of output. Newlines become spaces. Longer text is cut.
+
+    ``splitlines`` drops a trailing newline, so ``1 passed\\n`` previews
+    as ``1 passed``. The cut is ``_SHELL_OUTPUT_PREVIEW`` characters,
+    with ``...`` inside that budget. The JSON payload keeps the original
+    string.
+    """
+    flat = " ".join(output.splitlines())
+    if len(flat) <= _SHELL_OUTPUT_PREVIEW:
+        return flat
+    return flat[: _SHELL_OUTPUT_PREVIEW - 3] + "..."
+
+
+def _shell_command_lines(command: str) -> list[str]:
+    """Show the recorded command without stripping it.
+
+    A command with no newline stays on the ``command:`` line, including
+    an empty or whitespace-only string. A command that contains a newline
+    is indented under a ``command:`` label. Each piece from ``split`` on
+    ``\\n`` is kept, including a trailing empty piece, so a trailing
+    newline stays visible. Other whitespace is not rewritten.
+    """
+    if "\n" not in command:
+        return [f"  command: {command}"]
+    lines = ["  command:"]
+    lines.extend(f"    {line}" for line in command.split("\n"))
+    return lines
+
+
+def format_shell(payload: dict[str, Any]) -> str:
+    """Text for ``sessions shell``. Field order is fixed.
+
+    The first line names the session. A missing id is ``(unknown)``.
+    The next line is ``shell calls={n} ok={n_ok} failed={n_failed}
+    unpaired={n_unpaired}``. Counts come from the payload. A bool or
+    other non-int count is printed as 0. Zero calls are those two lines
+    and a trailing newline, with no extra blank line.
+
+    Otherwise a blank line, then one block per call in payload order.
+    Blocks are separated by one blank line, and a trailing newline
+    follows the last block. A non-list ``calls`` value is empty. An
+    entry that is not a dict is skipped. The summary counts are not
+    recomputed from the blocks.
+
+    A block starts with ``step={step} call_id={call_id} status={status}``.
+    A missing step is ``step=?``. A null call id is ``call_id=(none)``.
+    A logged timeout is appended as ``timeout={timeout}`` when it is an
+    int or a float and not a bool. The command follows. A null command
+    is ``command: (none)``. A string command is printed as recorded. An
+    output line is printed only when ``output`` is a string, including
+    an empty string. That line is a one-line preview, not the full text.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    session_id = str(payload.get("session_id") or "(unknown)")
+    n = _shell_count(payload.get("n", 0))
+    n_ok = _shell_count(payload.get("n_ok", 0))
+    n_failed = _shell_count(payload.get("n_failed", 0))
+    n_unpaired = _shell_count(payload.get("n_unpaired", 0))
+    head = (
+        f"session {session_id}\n"
+        f"shell calls={n} ok={n_ok} failed={n_failed} unpaired={n_unpaired}\n"
+    )
+    raw_calls = payload.get("calls")
+    calls = raw_calls if isinstance(raw_calls, list) else []
+    blocks: list[str] = []
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status", "")
+        if not isinstance(status, str):
+            status = ""
+        header = (
+            f"step={_shell_step(item.get('step'))} "
+            f"call_id={_shell_call_id(item.get('call_id'))} "
+            f"status={status}"
+        )
+        timeout = _shell_timeout(item.get("timeout"))
+        if timeout is not None:
+            header += f" timeout={timeout}"
+        lines = [header]
+        command = item.get("command")
+        if isinstance(command, str):
+            lines.extend(_shell_command_lines(command))
+        else:
+            lines.append("  command: (none)")
+        output = item.get("output")
+        if isinstance(output, str):
+            preview = _shell_output_preview(output)
+            if preview == "":
+                lines.append("  output:")
+            else:
+                lines.append(f"  output: {preview}")
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return head
+    return head + "\n" + "\n\n".join(blocks) + "\n"
+
+
 def _compare_int(value: Any) -> int:
     """Integer count from a comparison payload. Bools and other types are 0."""
     if isinstance(value, bool) or not isinstance(value, int):

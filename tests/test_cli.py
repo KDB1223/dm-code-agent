@@ -12,6 +12,7 @@ from dm_agent.present import (
     format_failures,
     format_files,
     format_patch,
+    format_shell,
     format_timing,
     format_tools,
 )
@@ -23,6 +24,7 @@ from dm_agent.session import (
     session_failures,
     session_files,
     session_patch,
+    session_shell,
     session_timing,
     session_tools,
     summarize_session,
@@ -642,7 +644,10 @@ def test_sessions_help_lists_failures(capsys) -> None:
         main(["sessions", "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{list,show,stats,changes,patch,files,tools,failures,timing,compare,replay,html}" in help_text
+    assert (
+        "{list,show,stats,changes,patch,files,tools,failures,timing,shell,compare,replay,html}"
+        in help_text
+    )
     assert "Tools are not executed and the model is not called." in " ".join(help_text.split())
     assert "unified diffs" in help_text
     assert "ok/fail counts" in help_text
@@ -827,6 +832,269 @@ def test_timing_errors_match_sibling_commands(monkeypatch, tmp_path: Path, capsy
     assert timing_exit.value.code == stats_exit.value.code == 2
     assert timing_err.strip().splitlines()[-1].replace("timing", "stats") == stats_err.strip().splitlines()[-1]
     assert "the following arguments are required: session_id" in timing_err
+    assert "the following arguments are required: session_id" in stats_err
+
+
+def test_sessions_help_lists_shell(capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["sessions", "--help"])
+    assert caught.value.code == 0
+    parent = capsys.readouterr().out
+    folded = " ".join(parent.split())
+    assert "shell" in parent
+    assert "Tools are not executed and the model is not called." in folded
+    assert "run_shell" in folded
+
+    with pytest.raises(SystemExit) as shell_help:
+        main(["sessions", "shell", "--help"])
+    assert shell_help.value.code == 0
+    text = capsys.readouterr().out
+    folded = " ".join(text.split())
+    assert "Tools are not executed and the model is not called." in folded
+    assert "run_shell" in folded
+    assert "--json" in text
+    assert "--workspace" in text
+    assert "--config" in text
+    assert "--log-dir" in text
+
+    with pytest.raises(SystemExit) as bare:
+        main(["sessions"])
+    assert bare.value.code == 0
+    assert "shell" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as choice:
+        main(["sessions", "help"])
+    assert choice.value.code == 2
+    assert "shell" in capsys.readouterr().err
+
+
+def test_shell_json_is_offline_and_matches_helper(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    log = _sample_log(tmp_path)
+    log.append(
+        kind="tool_call",
+        step=3,
+        tool="run_shell",
+        call_id="c-ok",
+        arguments={"command": "echo 你好", "timeout": 30},
+    )
+    log.append(
+        kind="tool_result",
+        step=3,
+        tool="run_shell",
+        call_id="c-ok",
+        ok=True,
+        output="你好\n",
+    )
+    log.append(
+        kind="tool_call",
+        step=4,
+        tool="run_shell",
+        call_id="c-refused",
+        arguments={"command": "python3 -c 'open(\"/etc/passwd\")'"},
+    )
+    log.append(
+        kind="tool_result",
+        step=4,
+        tool="run_shell",
+        call_id="c-refused",
+        ok=False,
+        output="Refused: absolute path is outside the workspace",
+    )
+    log.append(
+        kind="tool_call",
+        step=5,
+        tool="run_pytest",
+        call_id="c-py",
+        arguments={"path": "tests"},
+    )
+    log.append(
+        kind="tool_result",
+        step=5,
+        tool="run_pytest",
+        call_id="c-py",
+        ok=False,
+        output="failed",
+    )
+    log.append(
+        kind="tool_call",
+        step=6,
+        tool="run_shell",
+        call_id="c-open",
+        arguments={"command": "pwd", "timeout": 1.5},
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("shell must not construct tools")
+
+    monkeypatch.setattr("dm_agent.cli.build_registry", boom)
+    monkeypatch.setattr("dm_agent.cli.Agent", boom)
+
+    def boom_llm(*args, **kwargs):
+        raise AssertionError("shell must not call the model")
+
+    monkeypatch.setattr("dm_agent.cli.OpenAICompatibleLLM", boom_llm)
+
+    assert main(["sessions", "shell", log.session_id[:12], "--workspace", str(tmp_path), "--json"]) == 0
+    first = capsys.readouterr().out
+    assert main(["sessions", "shell", log.session_id, "--workspace", str(tmp_path), "--json"]) == 0
+    second = capsys.readouterr().out
+    assert first == second
+    expected = session_shell(load_events(log.path), session_id=log.session_id)
+    assert first == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    payload = json.loads(first)
+    assert payload["session_id"] == log.session_id
+    assert payload["n"] == 3
+    assert payload["n_ok"] == 1
+    assert payload["n_failed"] == 1
+    assert payload["n_unpaired"] == 1
+    assert [item["call_id"] for item in payload["calls"]] == ["c-ok", "c-refused", "c-open"]
+    assert payload["calls"][0]["command"] == "echo 你好"
+    assert payload["calls"][0]["timeout"] == 30
+    assert payload["calls"][0]["status"] == "ok"
+    assert payload["calls"][0]["output"] == "你好\n"
+    assert payload["calls"][1]["status"] == "failed"
+    assert payload["calls"][1]["output"].startswith("Refused:")
+    assert payload["calls"][2]["status"] == "unpaired"
+    assert payload["calls"][2]["timeout"] == 1.5
+    assert payload["calls"][2]["output"] is None
+    assert "c1" not in [item["call_id"] for item in payload["calls"]]
+    assert "run_pytest" not in first
+    assert "你好" in first
+    assert "\\u" not in first
+    assert not (tmp_path / "a.py").exists()
+
+    assert main(["sessions", "shell", log.session_id, "--workspace", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert text == f"file {log.path}\n" + format_shell(expected)
+    assert "shell calls=3 ok=1 failed=1 unpaired=1" in text
+    assert "echo 你好" in text
+    assert "status=failed" in text
+    assert "Refused:" in text
+
+    empty = log.path.parent / "20261108T100800Z-empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert main(["sessions", "shell", empty.stem, "--workspace", str(tmp_path), "--json"]) == 0
+    empty_out = capsys.readouterr().out
+    empty_payload = json.loads(empty_out)
+    assert empty_payload["session_id"] == empty.stem
+    assert empty_payload["n"] == 0
+    assert empty_payload["n_ok"] == 0
+    assert empty_payload["n_failed"] == 0
+    assert empty_payload["n_unpaired"] == 0
+    assert empty_payload["calls"] == []
+    assert main(["sessions", "shell", empty.stem, "--workspace", str(tmp_path)]) == 0
+    assert "shell calls=0 ok=0 failed=0 unpaired=0" in capsys.readouterr().out
+
+    custom = tmp_path / "custom-logs"
+    custom_log = SessionLog.create(custom)
+    custom_log.append(
+        kind="tool_call",
+        step=1,
+        tool="run_shell",
+        call_id="c-custom",
+        arguments={"command": "true"},
+    )
+    custom_log.append(
+        kind="tool_result",
+        step=1,
+        tool="run_shell",
+        call_id="c-custom",
+        ok=False,
+        output="failed",
+    )
+    assert (
+        main(
+            [
+                "sessions",
+                "shell",
+                custom_log.session_id,
+                "--workspace",
+                str(tmp_path),
+                "--log-dir",
+                str(custom),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    custom_payload = json.loads(capsys.readouterr().out)
+    assert custom_payload["n"] == 1
+    assert custom_payload["n_failed"] == 1
+    assert custom_payload["calls"][0]["command"] == "true"
+    assert custom_payload["calls"][0]["status"] == "failed"
+
+
+def test_shell_errors_match_sibling_commands(monkeypatch, tmp_path: Path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+
+    assert main(["sessions", "shell", "missing", "--workspace", str(tmp_path)]) == 1
+    shell_err = capsys.readouterr().err
+    assert main(["sessions", "stats", "missing", "--workspace", str(tmp_path)]) == 1
+    assert shell_err == capsys.readouterr().err
+    assert shell_err == "error: session not found: missing\n"
+
+    log_dir = tmp_path / ".dm-agent" / "sessions"
+    log_dir.mkdir(parents=True)
+    for suffix in ("aaa111", "aaa222"):
+        path = log_dir / f"20260101T000000Z-{suffix}.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-01-01T00:00:00.000Z",
+                    "session_id": path.stem,
+                    "seq": 1,
+                    "step": 0,
+                    "kind": "session_start",
+                    "task": suffix,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    assert main(["sessions", "shell", "20260101T000000Z-aaa", "--workspace", str(tmp_path)]) == 1
+    shell_err = capsys.readouterr().err
+    assert main(["sessions", "show", "20260101T000000Z-aaa", "--workspace", str(tmp_path)]) == 1
+    assert shell_err == capsys.readouterr().err
+    assert "ambiguous" in shell_err
+
+    assert main(["sessions", "shell", "bad/id", "--workspace", str(tmp_path)]) == 1
+    shell_err = capsys.readouterr().err
+    assert main(["sessions", "stats", "bad/id", "--workspace", str(tmp_path)]) == 1
+    assert shell_err == capsys.readouterr().err
+    assert "invalid session id" in shell_err
+
+    assert main(["sessions", "shell", ".hidden", "--workspace", str(tmp_path)]) == 1
+    shell_err = capsys.readouterr().err
+    assert main(["sessions", "files", ".hidden", "--workspace", str(tmp_path)]) == 1
+    assert shell_err == capsys.readouterr().err
+
+    missing_cfg = tmp_path / "missing.toml"
+    assert (
+        main(
+            [
+                "sessions",
+                "shell",
+                "missing",
+                "--config",
+                str(missing_cfg),
+                "--workspace",
+                str(tmp_path),
+            ]
+        )
+        == 2
+    )
+    assert "not found" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as shell_exit:
+        main(["sessions", "shell", "--workspace", str(tmp_path)])
+    shell_err = capsys.readouterr().err
+    with pytest.raises(SystemExit) as stats_exit:
+        main(["sessions", "stats", "--workspace", str(tmp_path)])
+    stats_err = capsys.readouterr().err
+    assert shell_exit.value.code == stats_exit.value.code == 2
+    assert shell_err.strip().splitlines()[-1].replace("shell", "stats") == stats_err.strip().splitlines()[-1]
+    assert "the following arguments are required: session_id" in shell_err
     assert "the following arguments are required: session_id" in stats_err
 
 

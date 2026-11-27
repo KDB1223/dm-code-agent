@@ -10,6 +10,7 @@ from dm_agent.present import (
     format_files,
     format_inspection,
     format_patch,
+    format_shell,
     format_stats,
     format_timing,
     format_tools,
@@ -25,6 +26,7 @@ from dm_agent.session import (
     session_failures,
     session_files,
     session_patch,
+    session_shell,
     session_stats,
     session_timing,
     session_tools,
@@ -2802,3 +2804,539 @@ def test_session_timing_parses_offset_timestamps() -> None:
     assert "2026-11-08T10:07:49.237+00:00" in text
     assert "2026-11-08T15:37:49.300+05:30" in text
     assert "  1  read_file  c  150ms\n" in text
+
+
+def test_session_shell_lists_run_shell_calls_in_log_order(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("session_shell must not run a command")
+
+    monkeypatch.setattr("subprocess.Popen", boom)
+    refused = "Refused: absolute path is outside the workspace\ncommand was not started"
+    long_output = "x" * 130
+    events = [
+        {"session_id": "sess-1", "step": 0, "kind": "session_start", "task": "audit"},
+        {"step": 1, "kind": "tool_result", "call_id": "c-early", "ok": True, "output": "early"},
+        _call(1, "run_shell", "c-ok", {"command": "pytest -q", "timeout": 30}),
+        {"step": 1, "kind": "tool_result", "call_id": "c-ok", "ok": True, "output": "1 passed\n"},
+        _call(1, "read_file", "c-read", {"path": "a.py"}),
+        _ok(1, "c-read"),
+        _call(1, "run_pytest", "c-py", {"path": "tests"}),
+        _ok(1, "c-py", ok=False),
+        _call(1, "lint_python", "c-lint", {"path": "a.py"}),
+        _call(1, "edit_file", "c-edit", {"path": "a.py", "old": "a", "new": "b"}),
+        _call(1, "write_file", "c-write", {"path": "notes/out.txt", "content": "x"}),
+        _call(2, "run_shell", "c-refused", {"command": "python3 -c 'open(\"/etc/passwd\")'"}),
+        {
+            "step": 2,
+            "kind": "tool_result",
+            "call_id": "c-refused",
+            "ok": False,
+            "output": refused,
+        },
+        _call(3, "run_shell", "c-num", {"command": "false", "timeout": 1.5}),
+        {"step": 3, "kind": "tool_result", "call_id": "c-num", "ok": 1, "output": "not a bool"},
+        _call(4, "run_shell", "c-flip", {"command": "echo hi", "timeout": 0}),
+        {"step": 4, "kind": "tool_result", "call_id": "c-flip", "ok": True, "output": "first"},
+        {
+            "step": 4,
+            "kind": "tool_result",
+            "call_id": "c-flip",
+            "ok": False,
+            "output": "second failed",
+        },
+        {"step": 5, "kind": "tool_call", "tool": "run_shell", "arguments": {"command": "pwd"}},
+        _call(5, "run_shell", "", {"command": "ls"}),
+        {"step": 5, "kind": "tool_result", "call_id": "", "ok": True, "output": "ignored-empty-id"},
+        {
+            "step": 6,
+            "kind": "tool_call",
+            "tool": "run_shell",
+            "call_id": 7,
+            "arguments": {"command": "true"},
+        },
+        {
+            "step": True,
+            "kind": "tool_call",
+            "tool": "run_shell",
+            "call_id": "c-list",
+            "arguments": ["pwd"],
+        },
+        _call(7, "run_shell", "c-empty", {"command": "", "timeout": True}),
+        {"step": 7, "kind": "tool_result", "call_id": "c-empty", "ok": True, "output": ""},
+        _call(8, "run_shell", "c-space", {"command": "  ", "timeout": 0}),
+        {"step": 8, "kind": "tool_result", "call_id": "c-space", "ok": True, "output": "ok"},
+        _call(9, "run_shell", "c-bad", {"command": ["ls"], "timeout": "30"}),
+        {"step": 9, "kind": "tool_result", "call_id": "c-bad", "ok": False, "output": ["nope"]},
+        {"step": 10, "kind": "tool_call", "tool": "run_shell", "call_id": "c-no-args"},
+        {"step": 10, "kind": "tool_result", "call_id": "c-no-args", "ok": False},
+        _call(11, "run_shell", "c-multi", {"command": "echo hi\necho there", "timeout": False}),
+        {"step": 11, "kind": "tool_result", "call_id": "c-multi", "ok": True, "output": long_output},
+        {
+            "step": 12,
+            "kind": "tool_call",
+            "tool": "run_shell ",
+            "call_id": "c-space-name",
+            "arguments": {"command": "ignored-space"},
+        },
+        {
+            "step": 12,
+            "kind": "tool_call",
+            "tool": "Run_Shell",
+            "call_id": "c-case",
+            "arguments": {"command": "ignored-case"},
+        },
+        {
+            "step": 12,
+            "kind": "tool_call",
+            "tool": None,
+            "call_id": "c-none-tool",
+            "arguments": {"command": "ignored-none"},
+        },
+        {
+            "step": 13,
+            "kind": "tool_result",
+            "tool": "run_shell",
+            "call_id": "c-ghost",
+            "ok": False,
+            "output": "ghost-output",
+        },
+        {"step": 14, "kind": "error", "content": "boom"},
+        {"step": 14, "kind": "final", "content": "done"},
+        {"step": 14, "kind": "thought", "content": "nope"},
+        _call(15, "run_shell", "c-shared", {"command": "first-shared"}),
+        _call(15, "run_shell", "c-shared", {"command": "second-shared"}),
+        {"step": 15, "kind": "tool_result", "call_id": "c-shared", "ok": True, "output": "shared-out"},
+        _call(16, "run_shell", "c-early", {"command": "echo early"}),
+        _call(17, "run_shell", "c-drop", {"command": "echo drop"}),
+        {
+            "step": 17,
+            "kind": "tool_result",
+            "call_id": "c-drop",
+            "ok": False,
+            "output": "kept-then-dropped",
+        },
+        {"step": 17, "kind": "tool_result", "call_id": "c-drop", "ok": True, "output": 5},
+        _call(18, "run_shell", " ", {"command": "echo space-id"}),
+        {"step": 18, "kind": "tool_result", "call_id": " ", "ok": False, "output": "id kept"},
+        _call(19, "run_shell", "c-nl", {"command": "\n"}),
+        _call(0, "run_shell", "c-zero", {"command": "true"}),
+        {"step": 0, "kind": "tool_result", "call_id": "c-zero", "ok": True, "output": "zero"},
+        _call(-1, "run_shell", "c-neg", {"command": "echo neg", "timeout": -3.5}),
+        {"step": -1, "kind": "tool_result", "call_id": "c-neg", "ok": True, "output": "neg"},
+        _call(20, "run_shell", "c-path", {"command": "echo only", "path": "script.sh"}),
+        {"step": 20, "kind": "tool_result", "call_id": "c-path", "ok": True, "output": "ran"},
+    ]
+    expected_calls = [
+        {
+            "step": 1,
+            "call_id": "c-ok",
+            "command": "pytest -q",
+            "timeout": 30,
+            "status": "ok",
+            "output": "1 passed\n",
+        },
+        {
+            "step": 2,
+            "call_id": "c-refused",
+            "command": "python3 -c 'open(\"/etc/passwd\")'",
+            "timeout": None,
+            "status": "failed",
+            "output": refused,
+        },
+        {
+            "step": 3,
+            "call_id": "c-num",
+            "command": "false",
+            "timeout": 1.5,
+            "status": "failed",
+            "output": "not a bool",
+        },
+        {
+            "step": 4,
+            "call_id": "c-flip",
+            "command": "echo hi",
+            "timeout": 0,
+            "status": "failed",
+            "output": "second failed",
+        },
+        {
+            "step": 5,
+            "call_id": None,
+            "command": "pwd",
+            "timeout": None,
+            "status": "unpaired",
+            "output": None,
+        },
+        {
+            "step": 5,
+            "call_id": None,
+            "command": "ls",
+            "timeout": None,
+            "status": "unpaired",
+            "output": None,
+        },
+        {
+            "step": 6,
+            "call_id": None,
+            "command": "true",
+            "timeout": None,
+            "status": "unpaired",
+            "output": None,
+        },
+        {
+            "step": None,
+            "call_id": "c-list",
+            "command": None,
+            "timeout": None,
+            "status": "unpaired",
+            "output": None,
+        },
+        {
+            "step": 7,
+            "call_id": "c-empty",
+            "command": "",
+            "timeout": None,
+            "status": "ok",
+            "output": "",
+        },
+        {
+            "step": 8,
+            "call_id": "c-space",
+            "command": "  ",
+            "timeout": 0,
+            "status": "ok",
+            "output": "ok",
+        },
+        {
+            "step": 9,
+            "call_id": "c-bad",
+            "command": None,
+            "timeout": None,
+            "status": "failed",
+            "output": None,
+        },
+        {
+            "step": 10,
+            "call_id": "c-no-args",
+            "command": None,
+            "timeout": None,
+            "status": "failed",
+            "output": None,
+        },
+        {
+            "step": 11,
+            "call_id": "c-multi",
+            "command": "echo hi\necho there",
+            "timeout": None,
+            "status": "ok",
+            "output": long_output,
+        },
+        {
+            "step": 15,
+            "call_id": "c-shared",
+            "command": "first-shared",
+            "timeout": None,
+            "status": "ok",
+            "output": "shared-out",
+        },
+        {
+            "step": 15,
+            "call_id": "c-shared",
+            "command": "second-shared",
+            "timeout": None,
+            "status": "ok",
+            "output": "shared-out",
+        },
+        {
+            "step": 16,
+            "call_id": "c-early",
+            "command": "echo early",
+            "timeout": None,
+            "status": "ok",
+            "output": "early",
+        },
+        {
+            "step": 17,
+            "call_id": "c-drop",
+            "command": "echo drop",
+            "timeout": None,
+            "status": "ok",
+            "output": None,
+        },
+        {
+            "step": 18,
+            "call_id": " ",
+            "command": "echo space-id",
+            "timeout": None,
+            "status": "failed",
+            "output": "id kept",
+        },
+        {
+            "step": 19,
+            "call_id": "c-nl",
+            "command": "\n",
+            "timeout": None,
+            "status": "unpaired",
+            "output": None,
+        },
+        {
+            "step": 0,
+            "call_id": "c-zero",
+            "command": "true",
+            "timeout": None,
+            "status": "ok",
+            "output": "zero",
+        },
+        {
+            "step": -1,
+            "call_id": "c-neg",
+            "command": "echo neg",
+            "timeout": -3.5,
+            "status": "ok",
+            "output": "neg",
+        },
+        {
+            "step": 20,
+            "call_id": "c-path",
+            "command": "echo only",
+            "timeout": None,
+            "status": "ok",
+            "output": "ran",
+        },
+    ]
+    payload = session_shell(events)
+    assert list(payload) == ["session_id", "n", "n_ok", "n_failed", "n_unpaired", "calls"]
+    assert payload == {
+        "session_id": "sess-1",
+        "n": 22,
+        "n_ok": 11,
+        "n_failed": 6,
+        "n_unpaired": 5,
+        "calls": expected_calls,
+    }
+    assert payload["n_ok"] + payload["n_failed"] + payload["n_unpaired"] == payload["n"]
+    for call in payload["calls"]:
+        assert list(call) == ["step", "call_id", "command", "timeout", "status", "output"]
+    commands = [call["command"] for call in payload["calls"]]
+    assert commands[0] == "pytest -q"
+    assert commands[8] == ""
+    assert commands[9] == "  "
+    assert commands[12] == "echo hi\necho there"
+    assert "ignored-space" not in commands
+    assert "ignored-case" not in commands
+    assert "ignored-none" not in commands
+    assert "script.sh" not in commands
+    outputs = [call["output"] for call in payload["calls"]]
+    assert "first" not in outputs
+    assert "kept-then-dropped" not in outputs
+    assert "ignored-empty-id" not in outputs
+    assert "ghost-output" not in outputs
+    assert refused in outputs
+    assert payload["calls"][1]["status"] == "failed"
+    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / "a.py").exists()
+    assert not (tmp_path / "script.sh").exists()
+    assert not (tmp_path / "notes").exists()
+
+    text = format_shell(payload)
+    parts = text.split("\n\n")
+    assert parts[-1].endswith("\n")
+    parts[-1] = parts[-1][:-1]
+    long_preview = "x" * 117 + "..."
+    assert parts == [
+        "session sess-1\nshell calls=22 ok=11 failed=6 unpaired=5",
+        "step=1 call_id=c-ok status=ok timeout=30\n  command: pytest -q\n  output: 1 passed",
+        (
+            "step=2 call_id=c-refused status=failed\n"
+            "  command: python3 -c 'open(\"/etc/passwd\")'\n"
+            "  output: Refused: absolute path is outside the workspace command was not started"
+        ),
+        "step=3 call_id=c-num status=failed timeout=1.5\n  command: false\n  output: not a bool",
+        "step=4 call_id=c-flip status=failed timeout=0\n  command: echo hi\n  output: second failed",
+        "step=5 call_id=(none) status=unpaired\n  command: pwd",
+        "step=5 call_id=(none) status=unpaired\n  command: ls",
+        "step=6 call_id=(none) status=unpaired\n  command: true",
+        "step=? call_id=c-list status=unpaired\n  command: (none)",
+        "step=7 call_id=c-empty status=ok\n  command: \n  output:",
+        "step=8 call_id=c-space status=ok timeout=0\n  command:   \n  output: ok",
+        "step=9 call_id=c-bad status=failed\n  command: (none)",
+        "step=10 call_id=c-no-args status=failed\n  command: (none)",
+        (
+            "step=11 call_id=c-multi status=ok\n"
+            "  command:\n"
+            "    echo hi\n"
+            "    echo there\n"
+            f"  output: {long_preview}"
+        ),
+        "step=15 call_id=c-shared status=ok\n  command: first-shared\n  output: shared-out",
+        "step=15 call_id=c-shared status=ok\n  command: second-shared\n  output: shared-out",
+        "step=16 call_id=c-early status=ok\n  command: echo early\n  output: early",
+        "step=17 call_id=c-drop status=ok\n  command: echo drop",
+        "step=18 call_id=  status=failed\n  command: echo space-id\n  output: id kept",
+        "step=19 call_id=c-nl status=unpaired\n  command:\n    \n    ",
+        "step=0 call_id=c-zero status=ok\n  command: true\n  output: zero",
+        "step=-1 call_id=c-neg status=ok timeout=-3.5\n  command: echo neg\n  output: neg",
+        "step=20 call_id=c-path status=ok\n  command: echo only\n  output: ran",
+    ]
+    assert long_output not in text
+    assert not text.endswith("\n\n")
+
+
+def test_session_shell_empty_events_and_format() -> None:
+    assert session_shell([]) == {
+        "session_id": "",
+        "n": 0,
+        "n_ok": 0,
+        "n_failed": 0,
+        "n_unpaired": 0,
+        "calls": [],
+    }
+    assert format_shell(session_shell([])) == (
+        "session (unknown)\nshell calls=0 ok=0 failed=0 unpaired=0\n"
+    )
+    assert format_shell({"session_id": "s", "calls": []}) == (
+        "session s\nshell calls=0 ok=0 failed=0 unpaired=0\n"
+    )
+    assert format_shell({"session_id": "s", "calls": None}) == (
+        "session s\nshell calls=0 ok=0 failed=0 unpaired=0\n"
+    )
+    assert format_shell({}) == "session (unknown)\nshell calls=0 ok=0 failed=0 unpaired=0\n"
+    fallback = session_shell(
+        [{"kind": "final", "step": 1, "content": "done"}],
+        session_id="from-stem",
+    )
+    assert fallback == {
+        "session_id": "from-stem",
+        "n": 0,
+        "n_ok": 0,
+        "n_failed": 0,
+        "n_unpaired": 0,
+        "calls": [],
+    }
+    assert format_shell(fallback) == (
+        "session from-stem\nshell calls=0 ok=0 failed=0 unpaired=0\n"
+    )
+    logged = session_shell(
+        [
+            {
+                "session_id": "",
+                "kind": "tool_call",
+                "tool": "run_shell",
+                "call_id": "c",
+                "arguments": {"command": "pwd"},
+            },
+            {"session_id": "later", "kind": "final", "step": 2, "content": "done"},
+        ],
+        session_id="from-stem",
+    )
+    assert logged["session_id"] == "later"
+    assert logged["n"] == 1
+    assert logged["n_unpaired"] == 1
+    assert logged["calls"] == [
+        {
+            "step": None,
+            "call_id": "c",
+            "command": "pwd",
+            "timeout": None,
+            "status": "unpaired",
+            "output": None,
+        }
+    ]
+    exact = "y" * 120
+    over = "y" * 121
+    spaced = "   \n  "
+    skipped = format_shell(
+        {
+            "session_id": "s",
+            "n": True,
+            "n_ok": "1",
+            "n_failed": None,
+            "n_unpaired": 1.5,
+            "calls": [
+                None,
+                "run_shell",
+                {
+                    "step": None,
+                    "call_id": None,
+                    "command": None,
+                    "timeout": True,
+                    "status": None,
+                    "output": None,
+                },
+                {
+                    "step": 1,
+                    "call_id": "",
+                    "command": "echo hi",
+                    "timeout": 2,
+                    "status": "ok",
+                    "output": "hi\nthere",
+                },
+                {
+                    "step": 2,
+                    "call_id": "c-empty-out",
+                    "command": "echo",
+                    "timeout": False,
+                    "status": "ok",
+                    "output": "",
+                },
+                {
+                    "step": 3,
+                    "call_id": "c-exact",
+                    "command": "echo exact",
+                    "timeout": 30.0,
+                    "status": "failed",
+                    "output": exact + "\n",
+                },
+                {
+                    "step": 4,
+                    "call_id": "c-over",
+                    "command": "a\n\nb",
+                    "timeout": "30",
+                    "status": "failed",
+                    "output": over,
+                },
+                {
+                    "step": 5,
+                    "call_id": "c-spaces",
+                    "command": "echo spaces",
+                    "status": "ok",
+                    "output": spaced,
+                },
+            ],
+        }
+    )
+    assert skipped == (
+        "session s\n"
+        "shell calls=0 ok=0 failed=0 unpaired=0\n"
+        "\n"
+        "step=? call_id=(none) status=\n"
+        "  command: (none)\n"
+        "\n"
+        "step=1 call_id=(none) status=ok timeout=2\n"
+        "  command: echo hi\n"
+        "  output: hi there\n"
+        "\n"
+        "step=2 call_id=c-empty-out status=ok\n"
+        "  command: echo\n"
+        "  output:\n"
+        "\n"
+        "step=3 call_id=c-exact status=failed timeout=30.0\n"
+        "  command: echo exact\n"
+        f"  output: {exact}\n"
+        "\n"
+        "step=4 call_id=c-over status=failed\n"
+        "  command:\n"
+        "    a\n"
+        "    \n"
+        "    b\n"
+        f"  output: {'y' * 117}...\n"
+        "\n"
+        "step=5 call_id=c-spaces status=ok\n"
+        "  command: echo spaces\n"
+        "  output:       \n"
+    )
+    over_block = skipped.split("call_id=c-over", 1)[1].split("call_id=c-spaces", 1)[0]
+    assert f"{'y' * 117}..." in over_block
+    assert "y" * 118 not in over_block

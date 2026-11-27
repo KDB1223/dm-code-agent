@@ -19,6 +19,7 @@ from dm_agent.present import (
     format_files,
     format_inspection,
     format_patch,
+    format_shell,
     format_stats,
     format_timing,
     format_tools,
@@ -34,6 +35,7 @@ from dm_agent.session import (
     session_failures,
     session_files,
     session_patch,
+    session_shell,
     session_stats,
     session_timing,
     session_tools,
@@ -169,6 +171,20 @@ def build_parser() -> argparse.ArgumentParser:
     timing.add_argument("session_id", help="Session id or a unique prefix.")
     timing.add_argument("--json", action="store_true", help="Print the timing as JSON.")
     timing.set_defaults(handler=cmd_timing)
+
+    shell_help = (
+        "List every run_shell call recorded in the log, including successes, refusals, and failures. "
+        "Tools are not executed and the model is not called."
+    )
+    shell = session_sub.add_parser(
+        "shell",
+        parents=[common],
+        help=shell_help,
+        description=shell_help,
+    )
+    shell.add_argument("session_id", help="Session id or a unique prefix.")
+    shell.add_argument("--json", action="store_true", help="Print the inventory as JSON.")
+    shell.set_defaults(handler=cmd_shell)
 
     compare = session_sub.add_parser(
         "compare",
@@ -367,6 +383,18 @@ def cmd_timing(args: argparse.Namespace) -> int:
         return 0
     print(f"file {path}")
     sys.stdout.write(format_timing(payload))
+    return 0
+
+
+def cmd_shell(args: argparse.Namespace) -> int:
+    """Print run_shell calls recorded in the log. Tools are not executed and the model is not called."""
+    path = _session_path(args)
+    payload = session_shell(load_events(path), session_id=path.stem)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"file {path}")
+    sys.stdout.write(format_shell(payload))
     return 0
 
 

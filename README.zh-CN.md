@@ -79,6 +79,7 @@ python -m dm_agent sessions files SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions tools SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions failures SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions timing SESSION_ID --workspace examples/demo_workspace
+python -m dm_agent sessions shell SESSION_ID --workspace examples/demo_workspace
 python -m dm_agent sessions compare SESSION_A SESSION_B --workspace examples/demo_workspace
 python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspace
 ```
@@ -96,6 +97,8 @@ python -m dm_agent sessions replay SESSION_ID --workspace examples/demo_workspac
 `failures` 只读同一份 JSONL，按日志顺序列出每一次失败的工具调用，以及会话里的 `error` 事件。最后一次结果不是成功、没有配对结果、或者没有 `call_id` 的调用都会计入，包括没有记下路径的工具（例如 `run_shell`）。每条包含 step、call id、状态（`failed` 或 `unpaired`）、记下的路径（如果有）和记下的输出。它不是当前工作区的文件列表。不需要 API key，也不会调用模型或重新执行工具。加上 `--json` 时输出同一份清单的 JSON。
 
 `timing` 只读同一份 JSONL，用每条事件上已有的 `ts` 还原墙钟时间。它打印会话的开始、结束和毫秒耗时，无法解析的时间戳条数，然后按 step 第一次出现的顺序列出每个模型回合，并按日志顺序列出每一次工具调用。回合与 `stats` 相同：`thought`、`tool_call`、`tool_result`、`final`、`max_steps`、`error`，且 `step` 为大于等于 1 的整数。一次调用与最后一个共享 `call_id` 的 `tool_result` 配对。耗时是整数毫秒；结束早于开始时为 0。开始或结束无法解析时（包括没有配对结果），JSON 里的耗时为 null，文本里写 `unknown`。0 只表示算出来的非负耗时，不表示未知。它不判断成功或失败，也不是另一份失败清单。不需要 API key，不会调用模型、重新执行工具，或对照工作区。空日志、缺少时间戳、未配对的调用仍然退出 0。加上 `--json` 时输出同一份计时的 JSON。
+
+`shell` 只读同一份 JSONL，按日志顺序列出每一次 `run_shell` 调用，包括成功的调用。`tools` 只按工具名计数，不显示命令文本。`failures` 列出的是所有工具的失败调用，不是完整的 shell 历史。每条包含 step、call id、记下的 `arguments.command`（按原文保留，包括空字符串和只有空白的字符串）、记下的数字 `arguments.timeout`（布尔值不算，也不用配置里的默认超时填上）、状态，以及配对结果的输出。状态为 `ok` 表示最后一个相同 `call_id` 的 `tool_result` 里 `ok` 为 true；`failed` 表示有配对结果且 `ok` 不是 true；`unpaired` 表示没有 call id，或没有共享该 id 的结果。被拒绝的命令在 `ok` 不是 true 时就是 `failed`，不会另设状态，也不会从输出里解析退出码。其他工具忽略。不需要 API key，不会调用模型、重新执行命令，或对照工作区。空日志、没有 `run_shell` 的日志、未配对的调用和失败的调用仍然退出 0。加上 `--json` 时输出同一份清单的 JSON，其中包含完整的输出字符串。
 
 `compare` 只读同一目录里的两份 JSONL。第一个 id 是基线，第二个是候选，差值是候选减去基线：回合数、`failures` 会列出的失败条数、各工具调用次数，以及成功的 `edit_file` / `write_file` 记下的路径（只在基线、只在候选、或两边都有）。路径按日志原文比较，不做规范化。状态与 `list` 对这份可读日志给出的词相同（`open`、`final`、`max_steps` 或 `error`）。`ended_cleanly` 表示最后一个终止事件是不是 `final`，因此可能和状态不同。这不是当前工作区的 diff，也不是模型质量分。不需要 API key，不会调用模型或重新执行工具。两边不同，或其中一边没有干净结束，仍然退出 0。加上 `--json` 时只输出这份比较的 JSON。
 
