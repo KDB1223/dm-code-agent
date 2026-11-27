@@ -690,6 +690,107 @@ def session_failures(events: list[dict[str, Any]], *, session_id: str = "") -> d
     }
 
 
+def session_shell(events: list[dict[str, Any]], *, session_id: str = "") -> dict[str, Any]:
+    """List every logged ``run_shell`` call in log order, with its command.
+
+    Only a ``tool_call`` whose ``tool`` is exactly ``run_shell`` is
+    included. ``run_pytest``, ``lint_python``, file tools, and any other
+    name are ignored. A ``tool_result`` with no matching call does not
+    invent a row. ``error``, ``final``, and thoughts are ignored.
+
+    Pairing matches ``_tool_result_ok``: the last ``tool_result`` whose
+    ``call_id`` is a non-empty string supplies ``ok`` and ``output``.
+    A later result replaces an earlier one for that id. A result that
+    appears before the call still pairs, because the scan covers the
+    whole log. Two calls that share an id both use that last result.
+
+    ``status`` is ``ok`` when the call id is a non-empty string and that
+    last result has ``ok`` true. ``status`` is ``failed`` when the id is
+    a non-empty string and a paired result exists whose ``ok`` is not
+    true, including numeric 1 and a refusal. ``status`` is ``unpaired``
+    when the id is missing, not a string, or empty, or when no result
+    shares it. A refused command is ``failed`` when ``ok`` is not true.
+    The output text is not parsed, and the word ``Refused`` is not a
+    separate status.
+
+    ``step`` is the integer step, including 0. Bools and other types are
+    null. ``call_id`` is the recorded id when it is a non-empty string,
+    and null otherwise. ``command`` is ``arguments.command`` when that
+    value is a string, including empty or whitespace-only. It is not
+    stripped or rewritten. A missing ``arguments`` object, a non-dict,
+    or a non-string command is null. ``timeout`` is ``arguments.timeout``
+    when it is an int or a float and not a bool, and null otherwise.
+    The config default is not filled in. ``output`` is the last paired
+    result's ``output`` when that value is a string, including empty,
+    and null otherwise. An unpaired call has null output.
+
+    ``n`` is the number of listed calls. ``n_ok``, ``n_failed``, and
+    ``n_unpaired`` count those statuses and partition ``n``. There is
+    no filter. ``session_id`` is the first non-empty string id in the
+    log, or the provided ``session_id`` when the log has none.
+
+    This reads the events only. It does not execute the command, call a
+    model, or read or diff the workspace.
+    """
+    result_ok = _tool_result_ok(events)
+    last_output: dict[str, Any] = {}
+    for event in events:
+        if event.get("kind") != "tool_result":
+            continue
+        raw_id = event.get("call_id")
+        if isinstance(raw_id, str) and raw_id:
+            last_output[raw_id] = event.get("output")
+
+    calls: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("kind") != "tool_call":
+            continue
+        if event.get("tool") != "run_shell":
+            continue
+        raw_call_id = event.get("call_id")
+        call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id else None
+        arguments = event.get("arguments")
+        command = None
+        timeout = None
+        if isinstance(arguments, dict):
+            raw_command = arguments.get("command")
+            if isinstance(raw_command, str):
+                command = raw_command
+            raw_timeout = arguments.get("timeout")
+            if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool):
+                timeout = raw_timeout
+        if call_id is not None and call_id in result_ok:
+            status = "ok" if result_ok[call_id] else "failed"
+            output = last_output.get(call_id)
+            if not isinstance(output, str):
+                output = None
+        else:
+            status = "unpaired"
+            output = None
+        calls.append(
+            {
+                "step": _event_step(event),
+                "call_id": call_id,
+                "command": command,
+                "timeout": timeout,
+                "status": status,
+                "output": output,
+            }
+        )
+
+    n_ok = sum(call["status"] == "ok" for call in calls)
+    n_failed = sum(call["status"] == "failed" for call in calls)
+    n_unpaired = sum(call["status"] == "unpaired" for call in calls)
+    return {
+        "session_id": _first_session_id(events, session_id),
+        "n": len(calls),
+        "n_ok": n_ok,
+        "n_failed": n_failed,
+        "n_unpaired": n_unpaired,
+        "calls": calls,
+    }
+
+
 def _recorded_lines(text: str) -> tuple[list[str], bool]:
     """Split ``text`` on ``\\n`` and report whether it ends with a newline.
 
